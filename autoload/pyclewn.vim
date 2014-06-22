@@ -15,7 +15,8 @@ let s:start_err .= "run the 'pyclewn' program to get the cause of the problem."
 " the ':Pyclewn' vim command is run.
 " They may be changed to match your preferences.
 
-let s:pgm = "pyclewn"
+"let s:pgm = "pyclewn"
+let s:pgm =g:pyclewn_home."/bin/pyclewn"
 
 if exists("pyclewn_args")
   let s:args = pyclewn_args

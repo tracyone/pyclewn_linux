@@ -5,8 +5,9 @@
 "
 
 " pyclewn version
-let g:pyclewn_version = "pyclewn-1.10.py2"
-
+let g:pyclewn_version = "pyclewn-1.11.py2"
+let s:plugin_path = escape(expand('<sfile>:p:h'), '\')
+let g:pyclewn_home = s:plugin_path."/../"
 " enable balloon_eval
 if has("balloon_eval")
     set ballooneval
