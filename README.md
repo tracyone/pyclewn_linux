@@ -8,7 +8,9 @@ new feature:
 
 - add icon in gvim toolbar
    ![toolbar](https://cloud.githubusercontent.com/assets/4246425/3483964/08cf1d4a-039b-11e4-9aab-498cb65956da.png)
+
    from left to right:
+
    * red triangle action:connect pyclewn-->Map keys ,pop up a gnome-terminal for program output,after this you can execute :Cfile to load program.
    * start debug,equal to :Cstart
    * X:stop debug close all split windows
