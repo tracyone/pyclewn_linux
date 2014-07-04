@@ -186,3 +186,5 @@ function s:error(msg)
     call inputrestore()
     echohl None
 endfunction
+
+
