@@ -7,6 +7,7 @@ pyclewn version:pyclewn-1.11
 new feature:
 
 - add icon in gvim toolbar
+
    ![toolbar](https://cloud.githubusercontent.com/assets/4246425/3483964/08cf1d4a-039b-11e4-9aab-498cb65956da.png)
 
    from left to right:
