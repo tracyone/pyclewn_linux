@@ -38,6 +38,7 @@ function! Pyclewnunmap()
     silent!	bdelete (clewn)_console
     silent! bwipeout (clewn)_dbgvar
     silent! ccl
+    exec "silent! !killall gnome-terminal"
 endfunction
 func! OpenClosedbgvar()
     if bufexists("(clewn)_dbgvar")
