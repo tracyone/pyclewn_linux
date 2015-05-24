@@ -5,6 +5,10 @@
 "
 
 " pyclewn version
+let s:is_linux=1
+if (has("win32")) || has("win64")
+let s:is_linux=0
+endif
 let g:pyclewn_version = "pyclewn-1.11.py2"
 let s:plugin_path = escape(expand('<sfile>:p:h'), '\')
 let g:pyclewn_home = s:plugin_path."/../"
@@ -63,7 +67,7 @@ func! LoadProj()
         :call Pyclewnmap()
     endif
 endfunc
-if g:iswindows==0
+if s:is_linux==1
     let g:pyclewn_args = "--args=-q --gdb=async --terminal=gnome-terminal,-x"
 else
     let g:pyclewn_args = "--args=-q --gdb=async"
@@ -76,7 +80,7 @@ nmap <leader>pd :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>
 nmap <leader>pc :Cproject .proj<cr>
 "}}}
 amenu ToolBar.-Sep- :
-if g:iswindows==1
+if s:is_linux==0
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgrun.bmp ToolBar.Run :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/run.bmp ToolBar.Start :Cstart<cr>
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/stop.bmp ToolBar.Quit :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>:call Pyclewnunmap()<cr>
