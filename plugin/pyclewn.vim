@@ -72,12 +72,12 @@ if s:is_linux==1
 else
     let g:pyclewn_args = "--args=-q --gdb=async"
 endif
-silent!	nmap <leader>pw :silent! Cdbgvar <C-R><C-W><CR>
-silent! nmap <leader>pf :silent! exe "Cfoldvar " . line(".")<CR>
-nmap <leader>ps :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
-nmap <leader>pp :call LoadProj()<cr>
-nmap <leader>pd :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>
-nmap <leader>pc :Cproject .proj<cr>
+silent!	nnoremap <leader>pw :silent! Cdbgvar <C-R><C-W><CR>
+silent! nnoremap <leader>pf :silent! exe "Cfoldvar " . line(".")<CR>
+nnoremap <leader>ps :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
+nnoremap <leader>pp :call LoadProj()<cr>
+nnoremap <leader>pd :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>
+nnoremap <leader>pc :Cproject .proj<cr>
 "}}}
 amenu ToolBar.-Sep- :
 if s:is_linux==0
