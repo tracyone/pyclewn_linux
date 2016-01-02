@@ -19,7 +19,7 @@ if has("balloon_eval")
 endif
 
 " The 'Pyclewn' command starts pyclewn and vim netbeans interface.
-command -nargs=* -complete=file Pyclewn call pyclewn#StartClewn(<f-args>)
+command! -nargs=* -complete=file Pyclewn call pyclewn#StartClewn(<f-args>)
 
 "{{{pyclewn
 function! Pyclewnmap()
