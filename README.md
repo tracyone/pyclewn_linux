@@ -2,7 +2,7 @@
 
 > [pyclewn](http://pyclewn.sourceforge.net/)is a powerful debug plugin for vim, and I think there a little trouble to install this plugin, so I make this rpos is to make pyclewn can be installed thought Vbunle or pathogen
 
-pyclewn version:pyclewn-1.11
+pyclewn's version:pyclewn-1.11
 
 new feature:
 
@@ -24,8 +24,8 @@ new feature:
    * when you are debugging ,press this button,it can create .proj file in current dir which save the info about breakpoint position and how to load the program(such as option and argurements)
 - key map
 	* after start pyclewn(red triangle button),press tab equal to :C
-	* <leader>pw equal to :silent! Cdbgvar(create a gdb watched variable in the variables buffer)
-	* <leader>pf  >When the watched variable is a structure or class instance, it can be expanded
+	* `<leader>pw` equal to :silent! Cdbgvar,create a gdb watched variable on current cursor
+	* `<space>` When the watched variable is a structure or class instance, it can be expanded
 with the|Cfoldvar|pyclewn command to display all its members and their values
 as children watched variables
 	* <leader>pp load proj setting
