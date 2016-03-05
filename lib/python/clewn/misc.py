@@ -1,38 +1,28 @@
 # vi:set ts=8 sts=4 sw=4 et tw=80:
-#
-# Copyright (C) 2007 Xavier de Gaye.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2, or (at your option)
-# any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program (see the file COPYING); if not, write to the
-# Free Software Foundation, Inc.,
-# 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA
-#
+"""
+Pyclewn miscellaneous classes and functions.
+"""
 
-"""Pyclewn miscellaneous classes and functions."""
+# Python 2-3 compatibility.
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from io import open
 
 import sys
 import os
-import os.path
+import fcntl
 import re
+import trollius as asyncio
 import tempfile
 import logging
-import subprocess
 import atexit
 import pprint
 import itertools
-import cStringIO
+import io
 
-from clewn import *
+from . import text_type, ClewnError
 
 DOUBLEQUOTE = '"'
 QUOTED_STRING = r'"((?:\\"|[^"])+)"'
@@ -47,8 +37,6 @@ RE_ESCAPE = r'["\n\t\r\\]'                                      \
             r'# RE: escaped characters in a string'
 RE_UNESCAPE = r'\\["ntr\\]'                                     \
               r'# RE: escaped characters in a quoted string'
-Unused = NBDEBUG
-Unused = LOG_LEVELS
 MISSING = object()
 
 # compile regexps
@@ -56,7 +44,6 @@ re_quoted = re.compile(QUOTED_STRING, re.VERBOSE)
 re_token_split = re.compile(RE_TOKEN_SPLIT, re.VERBOSE)
 re_escape = re.compile(RE_ESCAPE, re.VERBOSE)
 re_unescape = re.compile(RE_UNESCAPE, re.VERBOSE)
-Unused = re_quoted
 
 def logmethods(name):
     """Return the set of logging methods for the 'name' logger."""
@@ -71,9 +58,6 @@ def logmethods(name):
 
 # set the logging methods
 (critical, error, warning, info, debug) = logmethods('misc')
-Unused = error
-Unused = warning
-Unused = info
 
 def previous_evaluation(f, previous={}):
     """Decorator for functions returning previous result when args are unchanged."""
@@ -82,17 +66,6 @@ def previous_evaluation(f, previous={}):
             previous[f] = [args, f(*args)]
         return previous[f][1]
     return _dec
-
-# 'any' new in python 2.5
-try:
-    any = any
-except NameError:
-    def any(iterable):
-        """Return True if any element of the iterable is true."""
-        for element in iterable:
-            if element:
-                return True
-        return False
 
 def escape_char(matchobj):
     """Escape special characters in string."""
@@ -111,7 +84,7 @@ def dequote(msg):
     """Return the list of whitespace separated tokens from 'msg', handling
     double quoted substrings as a token.
 
-    >>> print dequote(r'"a c" b v "this \\"is\\" foobar argument" Y ')
+    >>> print(dequote(r'"a c" b v "this \\"is\\" foobar argument" Y '))
     ['a c', 'b', 'v', 'this "is" foobar argument', 'Y']
 
     """
@@ -135,45 +108,6 @@ def unquote(msg):
     """Remove escapes from escaped characters in a quoted string."""
     return '%s' % re_unescape.sub(unescape_char, msg)
 
-def norm_unixpath(line, ispath=False):
-    """Convert backward slashes to forward slashes on Windows.
-
-    If 'ispath' is True, then convert the whole line.
-    Otherwise, this is done for all existing paths in line
-    and handles quoted paths.
-    """
-    if os.name != 'nt':
-        return line
-    if ispath:
-        return line.replace('\\', '/')
-
-    # match is a list of tuples
-    # first element of tuple is '' when it is a keyword
-    # second element of tuple is '' when it is a quoted string
-    match = re_token_split.findall(line)
-    if not match:
-        return line
-    result = []
-    changed = False
-    for elem in match:
-        quoted = False
-        if not elem[0]:
-            token = elem[1]
-        elif not elem[1]:
-            quoted = True
-            token = elem[0]
-        else:
-            assert False
-        if os.path.exists(token) and '\\' in token:
-            token = token.replace('\\', '/')
-            changed = True
-        if quoted:
-            token = '"' + token + '"'
-        result.append(token)
-    if not changed:
-        return line
-    return ' '.join(result)
-
 def parse_keyval(regexp, line):
     """Return a dictionary built from a string of 'key="value"' pairs.
 
@@ -181,34 +115,14 @@ def parse_keyval(regexp, line):
         r'(key1|key2|...)=%s' % QUOTED_STRING
 
     """
+    keyval_dict = {}
     parsed = regexp.findall(line)
     if parsed and isinstance(parsed[0], tuple) and len(parsed[0]) == 2:
-        keyval_dict = {}
         for (key, value) in parsed:
             keyval_dict[key] = unquote(value)
-        return keyval_dict
-    debug('not an iterable of key/value pairs: "%s"', line)
-    return None
-
-# subprocess.check_call does not exist in Python 2.4
-def check_call(*popenargs, **kwargs):
-    """Run command with arguments.  Wait for command to complete.  If
-    the exit code was zero then return, otherwise raise
-    CalledProcessError.  The CalledProcessError object will have the
-    return code in the returncode attribute.
-
-    The arguments are the same as for the Popen constructor.  Example:
-
-    check_call(["ls", "-l"])
-
-    """
-    retcode = subprocess.call(*popenargs, **kwargs)
-    cmd = kwargs.get("args")
-    if cmd is None:
-        cmd = popenargs[0]
-    if retcode:
-        raise CalledProcessError(retcode, cmd)
-    return retcode
+    else:
+        debug('not an iterable of key/value pairs: "%s"', line)
+    return keyval_dict
 
 def smallest_prefix(word, other):
     """Return the smallest prefix of 'word', not prefix of 'other'."""
@@ -246,18 +160,14 @@ def unlink(filename):
         except OSError:
             pass
 
-def last_traceback():
-    """Return the last trace back."""
-    t, v, tb = sys.exc_info()
-    assert tb
-    while tb:
-        filename = tb.tb_frame.f_code.co_filename
-        lnum = tb.tb_lineno
-        last_tb = tb
-        tb = tb.tb_next
-    del tb
-
-    return t, v, filename, lnum, last_tb
+def set_blocking(fd, blocking):
+    if hasattr(os, 'set_blocking'):
+        os.set_blocking(fd, blocking)
+    else:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        flags = (flags & ~os.O_NONBLOCK if blocking else
+                 flags | os.O_NONBLOCK)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
 
 def offset_gen(lines):
     """Return an iterator over the offsets of the beginning of lines.
@@ -271,22 +181,63 @@ def offset_gen(lines):
 
 def tmpfile(prefix):
     """Return a closed file object to a new temporary file."""
-    f = None
-    try:
-        f = TmpFile(prefix)
+    with TmpFile(prefix) as f:
         f.write('\n')
-    finally:
-        if f:
-            f.close()
     return f
+
+def handle_as_lines(data, buff, handle_cb):
+    """Call 'handle_cb' for each line in buff + data."""
+    buff.append(data.decode())
+    data = ''.join(buff)
+    if '\n' in data:
+        del buff[:]
+        lines = data.split('\n')
+        if lines[-1]:
+            buff.append(lines[-1])
+        for line in lines[:-1]:
+            if line:
+                handle_cb(line)
+
+def cancel_after_first_completed(tasks, interrupted_cb, loop=None):
+    @asyncio.coroutine
+    def _cancel_after_first_completed(tasks):
+        while tasks:
+            done, pending = yield asyncio.From(asyncio.wait(tasks,
+                                return_when=asyncio.FIRST_COMPLETED,
+                                loop=loop))
+            for task in done:
+                info(task)
+                assert task in tasks
+                tasks.remove(task)
+            for task in pending:
+                task.cancel()
+
+    assert tasks
+    if not loop:
+        loop = asyncio.get_event_loop()
+
+    main_task = asyncio.Task(_cancel_after_first_completed(tasks[:]),
+                             loop=loop)
+    while True:
+        try:
+            loop.run_until_complete(main_task)
+            break
+        except (KeyboardInterrupt, SystemExit):
+            interrupted_cb()
+
+    for task in tasks:
+        assert task.done()
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                raise exc
 
 class PrettyPrinterString(pprint.PrettyPrinter):
     """Strings are printed with str() to avoid duplicate backslashes."""
 
     def format(self, object, context, maxlevels, level):
         """Format un object."""
-        unused = self
-        if type(object) is str:
+        if isinstance(object, text_type):
             return "'" + str(object) + "'", True, False
         return pprint._safe_repr(object, context, maxlevels, level)
 
@@ -295,43 +246,40 @@ def pformat(object, indent=1, width=80, depth=None):
     return PrettyPrinterString(
                     indent=indent, width=width, depth=depth).pformat(object)
 
-class CalledProcessError(ClewnError):
-    """This exception is raised when a process run by check_call() returns
-    a non-zero exit status.  The exit status will be stored in the
-    returncode attribute.
+class TmpFile(object):
+    """A container for a temporary writtable file object.
+
+    Support the context management protocol.
 
     """
-
-    def __init__(self, returncode, cmd):
-        """Constructor."""
-        ClewnError.__init__(self)
-        self.returncode = returncode
-        self.cmd = cmd
-
-    def __str__(self):
-        """Return the error message."""
-        return "Command '%s' returned non-zero exit status %d"  \
-                                        % (self.cmd, self.returncode)
-
-class TmpFile(file):
-    """An instance of this class is a writtable temporary file object."""
-
     def __init__(self, prefix):
-        """Constructor."""
-        self.tmpname = None
+        self.f = None
+        self.name = None
         try:
-            fd, self.tmpname = tempfile.mkstemp('.clewn', prefix)
+            fd, self.name = tempfile.mkstemp('.clewn', prefix)
             os.close(fd)
-            file.__init__(self, self.tmpname, 'w')
+            self.f = open(self.name, 'w')
         except (OSError, IOError):
-            unlink(self.tmpname)
+            unlink(self.name)
             critical('cannot create temporary file'); raise
         else:
-            atexit.register(unlink, self.tmpname)
+            atexit.register(unlink, self.name)
+
+    def write(self, data):
+        self.f.write(data)
+
+    def close(self):
+        if self.f:
+            self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, tb):
+        self.close()
 
     def __del__(self):
-        """Unlink the file."""
-        unlink(self.tmpname)
+        unlink(self.name)
 
 class Singleton(object):
     """A singleton, there is only one instance of this class."""
@@ -349,129 +297,11 @@ class Singleton(object):
         """Override in subclass."""
         pass
 
-class OrderedDict(dict):
-    """An ordered dictionary.
-
-    Ordered dictionaries are just like regular dictionaries but they
-    remember the order that items were inserted. When iterating over an
-    ordered dictionary, the items are returned in the order their keys were
-    first added.
-    """
-
-    def __init__(self, *args, **kwds):
-        """Constructor."""
-        if len(args) > 1:
-            raise TypeError('expected at most 1 arguments, got %d' % len(args))
-        if not hasattr(self, '_keys'):
-            self._keys = []
-        self.update(*args, **kwds)
-
-    def clear(self):
-        """Remove all items."""
-        del self._keys[:]
-        dict.clear(self)
-
-    def update(self, other=None, **kwargs):
-        """Update and overwrite key/value pairs."""
-        # make progressively weaker assumptions about "other"
-        if other is None:
-            pass
-        elif hasattr(other, 'iteritems'):
-            for k, v in other.iteritems():
-                self[k] = v
-        elif hasattr(other, 'keys'):
-            for k in other.keys():
-                self[k] = other[k]
-        else:
-            for k, v in other:
-                self[k] = v
-        if kwargs:
-            self.update(kwargs)
-
-    def copy(self):
-        """A  shallow copy."""
-        return self.__class__(self)
-
-    def keys(self):
-        """An ordered copy of the list of keys."""
-        return self._keys[:]
-
-    def values(self):
-        """An ordered of the list of values by keys."""
-        return map(self.get, self._keys)
-
-    def items(self):
-        """An ordered copy of the list of (key, value) pairs."""
-        return zip(self._keys, self.values())
-
-    def iteritems(self):
-        """Return an ordered iterator over (key, value) pairs."""
-        return itertools.izip(self._keys, self.itervalues())
-
-    def pop(self, key, default=MISSING):
-        """self[key] if key in self, else default (and remove key)."""
-        if key in self:
-            self._keys.remove(key)
-            return dict.pop(self, key)
-        elif default is MISSING:
-            return dict.pop(self, key)
-        return default
-
-    def popitem(self):
-        """Remove the (key, value) pair of the last added key."""
-        if not self:
-            raise KeyError('dictionary is empty')
-        key = self._keys.pop()
-        value = dict.pop(self, key)
-        return key, value
-
-    def setdefault(self, key, failobj=None):
-        """self[key] if key in self, else failobj (also setting it)."""
-        value = dict.setdefault(self, key, failobj)
-        if key not in self._keys:
-            self._keys.append(key)
-        return value
-
-    def itervalues(self):
-        """Return an ordered iterator over the values."""
-        return itertools.imap(self.get, self._keys)
-
-    def __setitem__(self, key, value):
-        """Called to implement assignment to self[key]."""
-        if key not in self:
-            self._keys.append(key)
-        dict.__setitem__(self, key, value)
-
-    @classmethod
-    def fromkeys(cls, iterable, value=None):
-        """Create a new dictionary with keys from seq and values set to value."""
-        d = cls()
-        for key in iterable:
-            d[key] = value
-        return d
-
-    def __delitem__(self, key):
-        """Called to implement deletion of self[key]."""
-        dict.__delitem__(self, key)
-        self._keys.remove(key)
-
-    def __iter__(self):
-        """Return an ordered iterator over the keys."""
-        return iter(self._keys)
-    iterkeys = __iter__
-
-    def __repr__(self):
-        """Return the string representation."""
-        if not self:
-            return '%s()' % (self.__class__.__name__,)
-        return '%s(%r)' % (self.__class__.__name__, self.items())
-
 class StderrHandler(logging.StreamHandler):
     """Stderr logging handler."""
 
     def __init__(self):
-        """Constructor."""
-        self.strbuf = cStringIO.StringIO()
+        self.strbuf = io.StringIO()
         self.doflush = True
         logging.StreamHandler.__init__(self, self.strbuf)
 
@@ -488,7 +318,7 @@ class StderrHandler(logging.StreamHandler):
         if self.doflush:
             value = self.strbuf.getvalue()
             if value:
-                print >>sys.stderr, value
+                print(value, end='', file=sys.stderr)
                 self.strbuf.truncate(0)
 
     def close(self):

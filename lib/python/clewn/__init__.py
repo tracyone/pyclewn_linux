@@ -1,47 +1,50 @@
 # vi:set ts=8 sts=4 sw=4 et tw=80:
-#
-# Copyright (C) 2007 Xavier de Gaye.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2, or (at your option)
-# any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program (see the file COPYING); if not, write to the
-# Free Software Foundation, Inc.,
-# 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA
-#
-
-"""The clewn package.
-
 """
-import sys
-try:
-    import clewn.__version__
-    __tag__ = clewn.__version__.tag
-    __changeset__ = clewn.__version__.changeset
-except ImportError:
-    __tag__ = 'unknown'
-    __changeset__ = ''
+The clewn package.
+"""
 
-__all__ = ['__tag__', '__changeset__', 'ClewnError']
-Unused = __tag__
-Unused = __changeset__
+# Python 2-3 compatibility.
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
+import sys
+import os
+
+__version__ = '2.2'
+
+# Python 2.6 or older
+PY26 = (sys.version_info < (2, 7))
+
+# Python 3.0 or newer
+PY3 = (sys.version_info >= (3,))
+
+# Python 3.2 or newer
+PY32 = (sys.version_info >= (3, 2))
+
+# Python 3.3 or newer
+PY33 = (sys.version_info >= (3, 3))
+
+# Python 3.4 or newer
+PY34 = (sys.version_info >= (3, 4))
+
+text_type = str if PY3 else unicode
 
 class ClewnError(Exception):
     """Base class for pyclewn exceptions."""
 
-# the subprocess module is required (new in python 2.4)
-if sys.version_info < (2, 4):
-    print >> sys.stderr, "Python 2.4 or above is required by pyclewn."
-    sys.exit(1)
-elif sys.version_info >= (3, 0):
-    sys.stderr.write("This version of pyclewn does not support Python 3.\n")
-    sys.exit(1)
+# Pyclewn uses OrderedDict (added in Python 3.1).
+# Trollius fails on Python 3.1 and pip does not support it.
+if PY26 or (PY3 and not PY32):
+    raise NotImplementedError('Python 2.7 or Python 3.2 or newer is required.')
+
+def get_vimball():
+    """Create the vimball in the current directory."""
+    from pkgutil import get_data
+    vmb = 'pyclewn-%s.vmb' % __version__
+    vimball = get_data(__name__, os.path.join('runtime', vmb))
+    with open(vmb, 'wb') as f:
+        f.write(vimball)
+    print('Creation of', os.path.abspath(vmb))
 

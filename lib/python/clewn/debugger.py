@@ -1,23 +1,6 @@
-# vi:set ts=8 sts=4 sw=4 et tw=72:
-#
-# Copyright (C) 2007 Xavier de Gaye.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2, or (at your option)
-# any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program (see the file COPYING); if not, write to the
-# Free Software Foundation, Inc.,
-# 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA
-#
-"""This module provides the basic infrastructure for using Vim as a
+# vi:set ts=8 sts=4 sw=4 et tw=80:
+"""
+This module provides the basic infrastructure for using Vim as a
 front-end to a debugger.
 
 The basic idea behind this infrastructure is to subclass the 'Debugger'
@@ -30,35 +13,42 @@ methods may call the 'Debugger' API methods to control Vim. For example,
 'console_print' may be called to write the output of a command in the
 Vim debugger console.
 
-The 'Debugger' subclass is made available to the user after adding an
-option to the 'parse_options' method in the 'Vim' class, see vim.py.
-
 The 'Simple' class in simple.py provides a simple example of a fake
 debugger front-end.
-
 """
+
+# Python 2-3 compatibility.
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from io import open
+
 import sys
 import os
-cwd = os.path.join(os.path.dirname(os.path.relpath(__file__)))
-binPath = os.path.join(cwd, "../../../bin")
-sys.path.append(binPath)
-
-import os
-import os.path
 import re
+import trollius as asyncio
 import time
 import logging
-import heapq
 import string
+import pkgutil
 import copy
 import subprocess
+from abc import ABCMeta, abstractmethod
 
-from clewn import *
-import clewn.misc as misc
-import clewn.netbeans as netbeans
+from . import __version__, ClewnError, misc, netbeans, runtime_version
 
-__all__ = ['LOOP_TIMEOUT', 'restart_timer', 'Debugger']
-LOOP_TIMEOUT = .040
+BCKGROUND_JOB_DELAY = .200
+COMPLETION_SUFFIX = ' %(pre)s%(cmd)s call s:nbcommand("%(cmd)s", <f-args>)'
+NOCOMPLETION = 'command! -bar -nargs=*' + COMPLETION_SUFFIX
+FILECOMPLETION = 'command! -bar -nargs=* -complete=file' + COMPLETION_SUFFIX
+LISTCOMPLETION = \
+'command! -bar -nargs=* -complete=custom,s:Arg_%(cmd)s' + COMPLETION_SUFFIX
+ARGSLIST = '''
+function s:Arg_%(cmd)s(A, L, P)
+    return "%(args)s"
+endfunction
+'''
 
 RE_KEY =    \
     r'^\s*(?P<key>'                                                     \
@@ -83,219 +73,8 @@ re_key = re.compile(RE_KEY, re.VERBOSE)
 re_comment = re.compile(RE_COMMENT, re.VERBOSE)
 re_filenamelnum = re.compile(RE_FILENAMELNUM, re.VERBOSE)
 
-AUTOCOMMANDS = """
-augroup clewn
-    autocmd!
-    autocmd BufWinEnter (clewn)_* silent! setlocal bufhidden=hide"""    \
-"""                                     | setlocal buftype=nofile"""    \
-"""                                     | setlocal noswapfile"""        \
-"""                                     | setlocal fileformat=unix"""   \
-"""                                     | setlocal expandtab"""         \
-"""                                     | setlocal nowrap"""            \
-"""
-    ${bufferlist_autocmd}
-    autocmd BufWinEnter ${console} silent! nbkey ClewnBuffer.Console.open
-    autocmd BufWinLeave ${console} silent! nbkey ClewnBuffer.Console.close
-    autocmd BufWinEnter ${variables} silent! nbkey ClewnBuffer.DebuggerVarBuffer.open
-    autocmd BufWinLeave ${variables} silent! nbkey ClewnBuffer.DebuggerVarBuffer.close
-    autocmd BufWinEnter ${variables} silent! setlocal syntax=dbgvar
-augroup END
-
-"""
-
-BUFFERLIST_AUTOCMD = """
-    autocmd VimEnter * silent! call s:BuildList()
-    autocmd BufWinEnter * silent! call s:InBufferList(expand("<afile>:p"))
-"""
-
-FUNCTION_BUFLIST = """
-let s:bufList = {}
-let s:bufLen = 0
-
-" Build the list as an hash of active buffers
-" This is the list of buffers loaded on startup,
-" that must be advertized to pyclewn
-function s:BuildList()
-    let wincount = winnr("$")
-    let index = 1
-    while index <= wincount
-        let s:bufList[expand("#". winbufnr(index) . ":p")] = 1
-        let index = index + 1
-    endwhile
-    let s:bufLen = len(s:bufList)
-endfunction
-
-" Return true when the buffer is in the list, and remove it
-function s:InBufferList(pathname)
-    if s:bufLen && has_key(s:bufList, a:pathname)
-        unlet s:bufList[a:pathname]
-        let s:bufLen = len(s:bufList)
-        return 1
-    endif
-    return 0
-endfunction
-
-" Function that can be used for testing
-" Remove 's:' to expand function scope to runtime
-function! s:PrintBufferList()
-    for key in keys(s:bufList)
-       echo key
-    endfor
-endfunction
-
-"""
-
-FUNCTION_SPLIT = """
-" Split a window and return to the initial window,
-" if 'location' is not ''
-"   'location' may be: '', 'top', 'bottom', 'left' or 'right'
-function s:split(bufname, location)
-    let nr = 1
-    let split = "split"
-    let spr = &splitright
-    let sb = &splitbelow
-    set nosplitright
-    set nosplitbelow
-    let prevbuf_winnr = bufwinnr(bufname("%"))
-    if winnr("$") == 1 && (a:location == "right" || a:location == "left")
-	let split = "vsplit"
-	if a:location == "right"
-	    set splitright
-        else
-            let prevbuf_winnr = 2
-	endif
-    else
-	if a:location == "bottom"
- 	    let nr = winnr("$")
-	    set splitbelow
-        else
-            let prevbuf_winnr = prevbuf_winnr + 1
-	endif
-	if a:location != ""
-	    exe nr . "wincmd w"
-	endif
-    endif
-    let nr = bufnr(a:bufname)
-    if nr != -1
-        exe &previewheight . split
-        exe nr . "buffer"
-    else
-        exe &previewheight . split . " " . a:bufname
-    endif
-    let &splitright = spr
-    let &splitbelow = sb
-    exe prevbuf_winnr . "wincmd w"
-endfunc
-
-"""
-
-FUNCTION_CONSOLE = """
-" Split a window and display a buffer with previewheight.
-function s:winsplit(bufname, location)
-    if a:location == "none"
-        return
-    endif
-
-    " The console window does not exist
-    if bufwinnr(a:bufname) == -1
-        call s:split(a:bufname, a:location)
-    " Split the console window (when the only window)
-    " this is required to prevent Vim display toggling between
-    " clewn console and the last buffer where the cursor was
-    " positionned (clewn does not know that this buffer is not
-    " anymore displayed)
-    elseif winnr("$") == 1
-        call s:split("", a:location)
-    endif
-endfunction
-
-"""
-
-FUNCTION_MAPKEYS = """
-" Popup gdb console on pyclewn mapped keys.
-function s:mapkeys()
-    call s:nbcommand("mapkeys")
-    cnoremap nbkey call <SID>winsplit("${console}", "${location}") <Bar> nbkey
-endfunction
-
-"""
-
-FUNCTION_NBCOMMAND = """
-" Run the nbkey netbeans Vim command.
-function s:nbcommand(...)
-    if !has("netbeans_enabled")
-        echohl ErrorMsg
-        echo "Error: netbeans is not connected."
-        echohl None
-        return
-    endif
-
-    " Allow '' as first arg: the 'C' command followed by a mandatory parameter
-    if a:0 != 0
-        if a:1 != "" || (a:0 > 1 && a:2 != "")
-            if bufname("%") == ""
-                edit ${console}
-            else
-                call s:winsplit("${console}", "${location}")
-            endif
-            ${split_dbgvar_buf}
-            let cmd = "nbkey " . join(a:000, ' ')
-            exe cmd
-        endif
-    endif
-endfunction
-
-"""
-
-FUNCTION_NBCOMMAND_RESTRICT = """
-" Run the nbkey netbeans Vim command.
-function s:nbcommand(...)
-    if bufname("%") == ""
-        echohl ErrorMsg
-        echo "Cannot run a pyclewn command on the '[No Name]' buffer."
-        echo "Please edit a file first."
-        echohl None
-        return
-    endif
-
-    " Allow '' as first arg: the 'C' command followed by a mandatory parameter
-    if a:0 != 0
-        if a:1 != "" || (a:0 > 1 && a:2 != "")
-            " edit the buffer that was loaded on startup and call input() to
-            " give a chance for vim72 to process the putBufferNumber netbeans
-            " message in the idle loop before the call to nbkey
-            let l:currentfile = expand("%:p")
-            if s:InBufferList(l:currentfile)
-                exe "edit " . l:currentfile
-                echohl WarningMsg
-                echo "Files loaded on Vim startup must be registered with pyclewn."
-                echo "Registering " . l:currentfile . " with pyclewn."
-                call inputsave()
-                call input("Press the <Enter> key to continue.")
-                call inputrestore()
-                echohl None
-            endif
-            call s:winsplit("${console}", "${location}")
-            ${split_dbgvar_buf}
-            let cmd = "nbkey " . join(a:000, ' ')
-            exe cmd
-        endif
-    endif
-endfunction
-
-"""
-
-SPLIT_DBGVAR_BUF = """
-            if a:1 == "dbgvar"
-                call s:winsplit("${dbgvar_buf}", "")
-            endif
-"""
-
 # set the logging methods
 (critical, error, warning, info, debug) = misc.logmethods('dbg')
-Unused = error
-Unused = warning
-Unused = debug
 
 def name_lnum(name_lnum):
     """Parse name_lnum as the string 'name:lnum'.
@@ -313,34 +92,6 @@ def name_lnum(name_lnum):
         name = netbeans.full_pathname(name)
         lnum = int(matchobj.group('lnum'))
     return name, lnum
-
-def restart_timer(timeout):
-    """Decorator to re-schedule the method at 'timeout', after it has run."""
-    def decorator(f):
-        """The decorator."""
-        def _newf(self, *args, **kwargs):
-            """The decorated method."""
-            job = getattr(self, f.func_name)
-            ret = f(self, *args, **kwargs)
-            self.timer(job, timeout)
-            return ret
-        return _newf
-    return decorator
-
-class Job:
-    """Job instances are pushed in an ordered heapq queue."""
-
-    def __init__(self, time, job):
-        """Constructor."""
-        self.time = time
-        self.job = job
-
-    def __lt__(self, o): """Comparison method."""; return self.time < o.time
-    def __le__(self, o): """Comparison method."""; return self.time <= o.time
-    def __eq__(self, o): """Comparison method."""; return self.time == o.time
-    def __ne__(self, o): """Comparison method."""; return self.time != o.time
-    def __gt__(self, o): """Comparison method."""; return self.time > o.time
-    def __ge__(self, o): """Comparison method."""; return self.time <= o.time
 
 class Debugger(object):
     """Abstract base class for pyclewn debuggers.
@@ -377,25 +128,20 @@ class Debugger(object):
             One can use template substitution on 'command', see the file
             runtime/.pyclewn_keys.template for a description of this
             feature.
-        options: optparse.Values
-            The pyclewn command line parameters.
-        vim_socket_map: dict
-            The asyncore socket dictionary
-        testrun: boolean
-            True when run from a test suite
         started: boolean
             True when the debugger is started.
         closed: boolean
             True when the debugger is closed.
         pyclewn_cmds: dict
             The subset of 'cmds' that are pyclewn specific commands.
+        bg_jobs: list
+            list of background jobs
+        proc_inftty: asyncio.subprocess
+            the inferiortty subprocess
         __nbsock: netbeans.Netbeans
-            The netbeans asynchat socket.
-        _jobs: list
-            list of pending jobs to run on a timer event in the
-            dispatch loop
-        _jobs_enabled: bool
-            process enqueued jobs when True
+            The netbeans protocol.
+        _delayed_call: delayed call
+            run jobs in the background
         _last_balloon: str
             The last balloonText event received.
         prompt: str
@@ -405,53 +151,45 @@ class Debugger(object):
 
     """
 
-    def __init__(self, options, vim_socket_map, testrun):
-        """Initialize instance variables and the prompt."""
-        self.options = options
-        self.vim_socket_map = vim_socket_map
-        self.testrun = testrun
+    __metaclass__ = ABCMeta
 
+    def __init__(self, vim):
+        """Initialize instance variables and the prompt."""
+        self.vim = vim
         self.cmds = {
-            'dumprepr':(),
-            'help':(),
+            'dumprepr': (),
+            'help': (),
             'loglevel': misc.LOG_LEVELS,
-            'mapkeys':(),
-            'unmapkeys':(),
+            'mapkeys': (),
+            'unmapkeys': (),
+            'exitclewn': (),
+            'ballooneval': (),
         }
-        self.vim_implementation = ['unmapkeys']
+        self.vim_implementation = ['unmapkeys', 'exitclewn']
         self.pyclewn_cmds = self.cmds
         self.mapkeys = {}
         self.cmds[''] = []
         self.started = False
         self.closed = False
-        self._jobs = []
-        self._jobs_enabled = False
         self._last_balloon = ''
         self.prompt = '(%s) ' % self.__class__.__name__.lower()
         self._consbuffered = False
         self.__nbsock = None
-
-        # schedule the first 'debugger_background_jobs' method
-        self.timer(self.debugger_background_jobs, LOOP_TIMEOUT)
+        self._read_keysfile()
+        self.bg_jobs = []
+        self.proc_inftty = None
+        self._delayed_call = None
+        self.ballooneval_enabled = True
 
     def set_nbsock(self, nbsock):
         """Set the netbeans socket."""
         self.__nbsock = nbsock
 
-    def set_nbsock_owner(self, thread_ident, socket_map=None):
-        """Add nbsock to 'socket_map' and make 'thread_ident' nbsock owner."""
-        if self.__nbsock:
-            self.__nbsock.set_owner_thread(thread_ident)
-            fd = self.__nbsock._fileno
-            if socket_map is not None:
-                socket_map[fd] = self.__nbsock
-            return fd
-        return None
-
     #-----------------------------------------------------------------------
     #   Overidden methods by the Debugger subclass.
     #-----------------------------------------------------------------------
 
+    @abstractmethod
     def pre_cmd(self, cmd, args):
         """The method called before each invocation of a 'cmd_<name>'
         method.
@@ -465,11 +203,8 @@ class Debugger(object):
                 The arguments of the command.
 
         """
-        unused = self
-        unused = cmd
-        unused = args
-        raise NotImplementedError('must be implemented in subclass')
 
+    @abstractmethod
     def default_cmd_processing(self, cmd, args):
         """Fall back method for commands not handled by a 'cmd_<name>'
         method.
@@ -483,11 +218,8 @@ class Debugger(object):
                 The arguments of the command.
 
         """
-        unused = self
-        unused = cmd
-        unused = args
-        raise NotImplementedError('must be implemented in subclass')
 
+    @abstractmethod
     def post_cmd(self, cmd, args):
         """The method called after each invocation of a 'cmd_<name>'
         method.
@@ -501,10 +233,6 @@ class Debugger(object):
                 The arguments of the command.
 
         """
-        unused = self
-        unused = cmd
-        unused = args
-        raise NotImplementedError('must be implemented in subclass')
 
     def vim_script_custom(self, prefix):
         """Return debugger specific Vim statements as a string.
@@ -594,19 +322,20 @@ class Debugger(object):
         """
         return self.__nbsock.get_lnum_list(pathname)
 
-    def update_dbgvarbuf(self, getdata, dirty, lnum=None):
-        """Update the variables buffer in Vim.
+    def update_listbuffer(self, bufname, getdata, dirty, lnum=None):
+        """Update a list buffer in Vim.
 
-        Update the variables buffer in Vim when one the following
-        conditions is
-        True:
+        Update the list buffer in Vim when one the following conditions
+        is True:
             * 'dirty' is True
-            * the content of the Vim variables buffer and the content of
-              pyclewn 'dbgvarbuf' are not consistent after an error in the
-              netbeans protocol occured
+            * the content of the Vim buffer and the content of the
+            pyclewn list buffer are not consistent after an error in the
+            netbeans protocol occured
         Set the Vim cursor at 'lnum' after the buffer has been updated.
 
         Method parameters:
+            bufname: str
+                The key to self.__nbsock.list_buffers dictionary.
             getdata: callable
                 A callable that returns the content of the variables
                 buffer as a string.
@@ -616,20 +345,30 @@ class Debugger(object):
                 The line number in the Vim buffer.
 
         """
-        dbgvarbuf = self.__nbsock.dbgvarbuf
-        if dbgvarbuf is None:
+        if not self.__nbsock or not self.__nbsock.list_buffers:
             return
-        if dirty and not dbgvarbuf.buf.registered:
-            dbgvarbuf.register()
 
-        # race condition: must note the state of the buffer before
+        # Update if the tabpage contains list buffers or the console
+        # or if it is the 'variables' buffer or if we are closing.
+        if (not netbeans.ClewnBuffer.clewn_tabpage and bufname != 'variables'
+                and not self.closed):
+            return
+
+        lbuf = self.__nbsock.list_buffers[bufname]
+        if dirty and not lbuf.buf.registered:
+            lbuf.register()
+
+        # Race condition: must note the state of the buffer before
         # updating the buffer, since this will change its visible state
-        # temporarily
-        if dirty or dbgvarbuf.dirty:
-            dbgvarbuf.update(getdata())
-            # set the cursor on the current fold when visible
+        # temporarily.
+        if dirty or lbuf.dirty:
+            lbuf.update(getdata())
+            # Set the cursor on the current fold when visible.
             if lnum is not None:
-                dbgvarbuf.setdot(lnum=lnum)
+                lbuf.setdot(lnum=lnum)
+
+    def update_tabpage_buffers(self):
+        """Update all the list buffers that may be located in a tab page."""
 
     def show_frame(self, pathname=None, lnum=1):
         """Show the frame highlighted sign in a Vim buffer.
@@ -667,7 +406,8 @@ class Debugger(object):
                 The text to show in the balloon.
 
         """
-        self.__nbsock.show_balloon(text)
+        if self.ballooneval_enabled:
+            self.__nbsock.show_balloon(text)
 
     def print_prompt(self):
         """Print the prompt in the Vim debugger console."""
@@ -705,60 +445,60 @@ class Debugger(object):
         """Flush the console."""
         self.__nbsock.console.flush()
 
-    def timer(self, callme, delta):
-        """Schedule the 'callme' job at 'delta' time from now.
-
-        The timer granularity is LOOP_TIMEOUT, so it does not make sense
-        to request a 'delta' time less than LOOP_TIMEOUT.
-
-        Method parameters:
-            callme: callable
-                the job being scheduled
-            delta: float
-                time interval
-
-        """
-        heapq.heappush(self._jobs, Job(time.time() + delta, callme))
-
-    def inferiortty(self):
+    def inferiortty(self, set_inferior_tty_cb):
         """Spawn the inferior terminal."""
-        args = self.options.terminal.split(',')
-        result_file = misc.tmpfile('dbg')
-        args.extend([binPath+"/inferior_tty.py", result_file.name])
-        info('inferiortty: %s' % args)
-        try:
-            subprocess.Popen(args)
-        except OSError, e:
-            self.console_print('Cannot spawn terminal: %s\n' % e)
-            return
-
-        start = time.time()
-        while time.time() - start < 2:
+        @asyncio.coroutine
+        def _set_inferior_tty():
+            if self.proc_inftty:
+                if self.proc_inftty.returncode is None:
+                    self.proc_inftty.terminate()
+                self.proc_inftty = None
             try:
-                f = None
-                try:
-                    f = open(result_file.name)
-                    lines = f.readlines()
-                    # commands found in the result file
-                    if len(lines) == 2 and lines[0].startswith('set'):
-                        return lines
-                finally:
-                    if f:
-                        f.close()
-            except IOError, e:
-                self.console_print(
-                        'Cannot set the inferior tty: %s\n' % e)
-                return
-            time.sleep(.20)
+                self.proc_inftty = proc = yield asyncio.From(
+                                        asyncio.create_subprocess_exec(*args))
+                info('inferiortty: {}'.format(args))
+            except OSError as e:
+                self.console_print('Cannot spawn terminal: {}\n'.format(e))
+            else:
+                start = time.time()
+                while time.time() - start < 2:
+                    try:
+                        with open(result_file.name) as f:
+                            lines = f.readlines()
+                            # Commands found in the result file.
+                            if len(lines) == 2:
+                                set_inferior_tty_cb(lines[0])
+                                set_inferior_tty_cb(lines[1])
+                                break
+                    except IOError as e:
+                        self.console_print(
+                            'Cannot set the inferior tty: {}\n'.format(e))
+                        proc.terminate()
+                        break
+                    yield asyncio.From(asyncio.sleep(.100, loop=self.vim.loop))
+                else:
+                    self.console_print('Failed to start inferior_tty.py.\n')
+                    proc.terminate()
 
-        self.console_print('Failed to start inferior_tty.py.\n')
+        args = self.vim.options.terminal.split(',')
+        result_file = misc.tmpfile('dbg')
+        args.append('%s -m clewn.inferiortty %s' %
+                    (sys.executable, result_file.name))
+        asyncio.Task(_set_inferior_tty(), loop=self.vim.loop)
 
     def close(self):
         """Close the debugger and remove all signs in Vim."""
         info('enter Debugger.close')
+        if self.proc_inftty:
+            if self.proc_inftty.returncode is None:
+                self.proc_inftty.terminate()
+            self.proc_inftty = None
         if not self.closed:
             self.started = False
             self.closed = True
+            self.vim.signal(self)
+            if self._delayed_call:
+                self._delayed_call.cancel()
             info('in close: remove all annotations')
             self.remove_all()
 
@@ -780,11 +520,17 @@ class Debugger(object):
         """
         if not self.started:
             self.started = True
-            # print the banner only with the first netbeans instance
+
+            # Schedule the first '_background_jobs' method.
+            self.bg_jobs.append([self.flush_console])
+            self._delayed_call = self.vim.loop.call_later(BCKGROUND_JOB_DELAY,
+                                            self._background_jobs)
+
+            # Print the banner only with the first netbeans instance.
             if not self.closed:
                 self.console_print(
                     'Pyclewn version %s starting a new instance of %s.\n',
-                            __tag__, self.__class__.__name__.lower())
+                            __version__, self.__class__.__name__.lower())
             else:
                 self.console_print(
                     'Pyclewn restarting the %s debugger.\n',
@@ -795,9 +541,16 @@ class Debugger(object):
     def start(self):
         """This method must be implemented in a subclass."""
 
-    @restart_timer(LOOP_TIMEOUT)
-    def debugger_background_jobs(self):
+    def _background_jobs(self):
         """Flush the console buffer."""
+        self._delayed_call = self.vim.loop.call_later(BCKGROUND_JOB_DELAY,
+                                        self._background_jobs)
+        for job in self.bg_jobs:
+            callback = job[0]
+            args = job[1:]
+            callback(*args)
+
+    def flush_console(self):
         if not self.__nbsock:
             return
         console = self.__nbsock.console
@@ -814,7 +567,7 @@ class Debugger(object):
 
         return self.cmds
 
-    def _vim_script(self, options):
+    def vim_script(self):
         """Build the vim script.
 
         Each clewn vim command can be invoked as 'prefix' + 'cmd' with optional
@@ -824,12 +577,37 @@ class Debugger(object):
         Return the file object of the vim script.
 
         """
-        # create the vim script in a temporary file
+        options = self.vim.options
         prefix = options.prefix.capitalize()
+
+        commands = []
+        substitute = {'pre': prefix}
+        for cmd, completion in self._get_cmds().items():
+            substitute['cmd'] = cmd
+            if cmd in ('mapkeys', 'unmapkeys', 'exitclewn'):
+                commands.append(
+                    'command! -bar %(pre)s%(cmd)s call s:%(cmd)s()'
+                    % substitute)
+                continue
+
+            try:
+                iter(completion)
+            except TypeError:
+                commands.append(FILECOMPLETION % substitute)
+            else:
+                if not completion:
+                    commands.append(NOCOMPLETION % substitute)
+                else:
+                    commands.append(LISTCOMPLETION % substitute)
+                    substitute['args'] = '\\n'.join(completion)
+                    commands.append(ARGSLIST % substitute)
+
+        # Create the vim script in a temporary file.
         f = None
         try:
-            # pyclewn is started from within vim
             if not options.editor:
+                # pyclewn is started from within vim and the vim
+                # argument is the name of the temporary file.
                 if options.cargs:
                     f = open(options.cargs[0], 'w')
                 else:
@@ -837,121 +615,28 @@ class Debugger(object):
             else:
                 f = misc.TmpFile('vimscript')
 
-            # set 'cpo' option to its vim default value
-            f.write('let s:cpo_save=&cpo\n')
-            f.write('set cpo&vim\n')
+            substitute = {
+                'pre': prefix,
+                'window': options.window,
+                'noname_fix': options.noname_fix,
+                'getLength_fix': netbeans.Netbeans.getLength_fix,
+                'console': netbeans.CONSOLE,
+                'mapkeys': ', '.join('"<' + k + '>"' for k in self.mapkeys),
+                'commands': '\n'.join(commands),
+                'debugger': self.__class__.__name__.lower(),
+                'debugger_specific': self.vim_script_custom(prefix),
+                'version': __version__,
+                'runtime_version': runtime_version.version,
+                'usetab': (1 if self.vim.options.window == 'usetab' else 0),
+                         }
+            f.write(pkgutil.get_data(__name__, 'debugger.vim').decode()
+                    % substitute)
 
-            # vim autocommands
-            bufferlist_autocmd = ''
-            if options.noname_fix == '0':
-                bufferlist_autocmd = BUFFERLIST_AUTOCMD
-            f.write(string.Template(AUTOCOMMANDS).substitute(
-                                        console=netbeans.CONSOLE,
-                                        variables=netbeans.VARIABLES_BUFFER,
-                                        bufferlist_autocmd=bufferlist_autocmd))
-
-            # utility vim functions
-            if options.noname_fix == '0':
-                f.write(FUNCTION_BUFLIST)
-            f.write(FUNCTION_SPLIT)
-            f.write(FUNCTION_CONSOLE)
-
-            # mapkeys function
-            f.write(string.Template(FUNCTION_MAPKEYS).substitute(
-                                        console=netbeans.CONSOLE,
-                                        location=options.window))
-
-            # unmapkeys function
-            f.write('function s:unmapkeys()\n')
-            f.write('    try\n')
-            f.write('    cunmap nbkey\n')
-            f.write('   catch /.*/\n')
-            f.write('   endtry\n')
-            for key in self.mapkeys:
-                f.write('try\n')
-                f.write('unmap <%s>\n' % key)
-                f.write('catch /.*/\n')
-                f.write('endtry\n')
-            f.write('endfunction\n')
-
-            # setup pyclewn vim user defined commands
-            if options.noname_fix != '0':
-                function_nbcommand = FUNCTION_NBCOMMAND
-            else:
-                function_nbcommand = FUNCTION_NBCOMMAND_RESTRICT
-
-            split_dbgvar_buf = ''
-            if netbeans.Netbeans.getLength_fix != '0':
-                split_dbgvar_buf = string.Template(SPLIT_DBGVAR_BUF).substitute(
-                                        dbgvar_buf=netbeans.VARIABLES_BUFFER)
-            f.write(string.Template(function_nbcommand).substitute(
-                                        console=netbeans.CONSOLE,
-                                        location=options.window,
-                                        split_dbgvar_buf=split_dbgvar_buf))
-            noCompletion = string.Template('command -bar -nargs=* ${pre}${cmd} '
-                                    'call s:nbcommand("${cmd}", <f-args>)\n')
-            fileCompletion = string.Template('command -bar -nargs=* '
-                                    '-complete=file ${pre}${cmd} '
-                                    'call s:nbcommand("${cmd}", <f-args>)\n')
-            listCompletion = string.Template('command -bar -nargs=* '
-                                    '-complete=custom,s:Arg_${cmd} ${pre}${cmd} '
-                                    'call s:nbcommand("${cmd}", <f-args>)\n')
-            argsList = string.Template('function s:Arg_${cmd}(A, L, P)\n'
-                                    '\treturn "${args}"\n'
-                                    'endfunction\n')
-            for cmd, completion in self._get_cmds().iteritems():
-                if cmd in ('mapkeys', 'unmapkeys'):
-                    f.write(string.Template('command! -bar ${pre}${cmd} call '
-                            's:${cmd}()\n').substitute(cmd=cmd, pre=prefix))
-                    continue
-
-                try:
-                    iter(completion)
-                except TypeError:
-                    f.write(fileCompletion.substitute(pre=prefix, cmd=cmd))
-                else:
-                    if not completion:
-                        f.write(noCompletion.substitute(pre=prefix, cmd=cmd))
-                    else:
-                        f.write(listCompletion.substitute(pre=prefix, cmd=cmd))
-                        args = '\\n'.join(completion)
-                        f.write(argsList.substitute(args=args, cmd=cmd))
-
-            # add debugger specific vim statements
-            f.write(self.vim_script_custom(prefix))
-
-            # reset 'cpo' option
-            f.write('let &cpo = s:cpo_save\n')
-
-            # delete the vim script after it has been sourced
-            f.write('\ncall delete(expand("<sfile>"))\n')
         finally:
             if f:
                 f.close()
 
         return f
-
-    def _call_jobs(self):
-        """Call the scheduled jobs.
-
-        This method is called in Vim dispatch loop.
-        Return the timeout for the next iteration of the event loop.
-
-        """
-        if not self.__nbsock:
-            return LOOP_TIMEOUT
-        timeout = LOOP_TIMEOUT
-        if not self._jobs_enabled and self.__nbsock.ready:
-            self._jobs_enabled = True
-        if self._jobs_enabled:
-            now = time.time()
-            while self._jobs and now >= self._jobs[0].time:
-                callme = heapq.heappop(self._jobs).job
-                callme()
-                now = time.time()
-            if self._jobs:
-                timeout = min(timeout, abs(self._jobs[0].time - now))
-        return timeout
 
     def _do_cmd(self, method, cmd, args):
         """Process 'cmd' and its 'args' with 'method'."""
@@ -961,13 +646,13 @@ class Debugger(object):
 
     def _dispatch_keypos(self, cmd, args, buf, lnum):
         """Dispatch the keyAtPos event to the proper cmd_xxx method."""
-        if not self.started:
-            self._start()
-
-        # do key mapping substitution
+        # Do key mapping substitution.
         mapping = self._keymaps(cmd, buf, lnum)
         if mapping:
             cmd, args = (lambda a, b='': (a, b))(*mapping.split(None, 1))
+
+        if not self.started:
+            self._start()
 
         try:
             method = getattr(self, 'cmd_%s' % cmd)
@@ -1004,28 +689,27 @@ class Debugger(object):
 
         info('reading %s', path)
         try:
-            f = open(path)
-            for line in f:
-                matchobj = re_key.match(line)
-                if matchobj:
-                    k = matchobj.group('key').upper()
-                    v = matchobj.group('value')
-                    # delete key when empty value
-                    if not v:
-                        if k in self.mapkeys:
-                            del self.mapkeys[k]
-                    else:
-                        self.mapkeys[k] = (v.strip(),)
-                elif not re_comment.match(line):
-                    raise ClewnError('invalid line in %s: %s' % (path, line))
-            f.close()
+            with open(path) as f:
+                for line in f:
+                    matchobj = re_key.match(line)
+                    if matchobj:
+                        k = matchobj.group('key').upper()
+                        v = matchobj.group('value')
+                        # delete key when empty value
+                        if not v:
+                            if k in self.mapkeys:
+                                del self.mapkeys[k]
+                        else:
+                            self.mapkeys[k] = (v.strip(),)
+                    elif not re_comment.match(line):
+                        raise ClewnError('invalid line in %s: %s' %
+                                         (path, line))
         except IOError:
             critical('reading %s', path); raise
 
     def cmd_help(self, *args):
         """Print help on all pyclewn commands in the Vim debugger
         console."""
-        unused = args
         for cmd in sorted(self.pyclewn_cmds):
             if cmd:
                 method = getattr(self, 'cmd_%s' % cmd, None)
@@ -1037,19 +721,17 @@ class Debugger(object):
 
     def cmd_dumprepr(self, cmd, args):
         """Print debugging information on netbeans and the debugger."""
-        unused = cmd
         # dumprepr is used by the testsuite to detect the end of
         # processing by pyclewn of all commands, so as to parse the
         # results and check the test
-        if not (self.testrun and args):
+        if not (self.vim.testrun and args):
             self.console_print(
-                    'netbeans:\n%s\n' % misc.pformat(self.__nbsock.__dict__)
-                    + '%s:\n%s\n' % (self.__class__.__name__.lower(), self))
+                'netbeans:\n%s\n' % misc.pformat(self.__nbsock.__dict__)
+                + '%s:\n%s\n' % (self.__class__.__name__.lower(), self))
             self.print_prompt()
 
     def cmd_loglevel(self, cmd, level):
         """Get or set the pyclewn log level."""
-        unused = cmd
         if not level:
             level = logging.getLevelName(logging.getLogger().level).lower()
             self.console_print("The pyclewn log level is currently '%s'.\n"
@@ -1066,7 +748,6 @@ class Debugger(object):
 
     def cmd_mapkeys(self, *args):
         """Map the pyclewn keys."""
-        unused = args
         for k in sorted(self.mapkeys):
             self.__nbsock.special_keys(k)
 
@@ -1085,7 +766,7 @@ class Debugger(object):
 
     def not_a_pyclewn_method(self, cmd):
         """"Warn that 'cmd' cannot be used as 'C' parameter."""
-        table = {'cmd': cmd, 'C': self.options.prefix}
+        table = {'cmd': cmd, 'C': self.vim.options.prefix}
         self.console_print("'%(cmd)s' cannot be used as '%(C)s' parameter,"
                 " use '%(C)s%(cmd)s' instead.\n" % table)
         self.print_prompt()
@@ -1096,9 +777,22 @@ class Debugger(object):
         This is actually a Vim command and it does not involve pyclewn.
 
         """
-        unused = self
-        unused = args
         self.not_a_pyclewn_method(cmd)
+
+    def cmd_exitclewn(self, cmd, *args):
+        """Close the debugging session.
+
+        This is actually a Vim command and it does not involve pyclewn.
+
+        """
+        self.not_a_pyclewn_method(cmd)
+
+    def cmd_ballooneval(self, *args):
+        """Enable or disable showing text in Vim balloon."""
+        self.ballooneval_enabled = False if self.ballooneval_enabled else True
+        setting = 'en' if self.ballooneval_enabled else 'dis'
+        self.console_print('ballooneval has been %sabled.\n' % setting)
+        self.print_prompt()
 
     def __str__(self):
         """Return the string representation."""

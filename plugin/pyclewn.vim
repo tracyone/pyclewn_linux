@@ -1,63 +1,56 @@
-" pyclewn run time file
+" Pyclewn run time file.
 " Maintainer:   <xdegaye at users dot sourceforge dot net>
-"
-" Configure VIM to be used with pyclewn and netbeans
-"
 
-" pyclewn version
 let s:is_linux=1
 if (has("win32")) || has("win64")
-let s:is_linux=0
+    let s:is_linux=0
 endif
-let g:pyclewn_version = "pyclewn-1.11.py2"
+
 let s:plugin_path = escape(expand('<sfile>:p:h'), '\')
 let g:pyclewn_home = s:plugin_path."/../"
-" enable balloon_eval
+let g:pyclewn_python = g:pyclewn_home."bin/pyclewn"
+" Enable balloon_eval.
 if has("balloon_eval")
     set ballooneval
     set balloondelay=100
 endif
 
 " The 'Pyclewn' command starts pyclewn and vim netbeans interface.
-command! -nargs=* -complete=file Pyclewn call pyclewn#StartClewn(<f-args>)
+command -nargs=* -complete=file Pyclewn call pyclewn#start#StartClewn(<f-args>)
 
 "autocmd group for pyclewn
 augroup PyclewnGroup
     au!
 augroup END
 
-"{{{pyclewn
+let g:pyclewn_terminal="gnome-terminal,-x" 
+if s:is_linux==1
+    let g:pyclewn_args = "--args=-q  --gdb=async --window=top --maxlines=10000 --background=Cyan,Green,Magenta"
+else
+    let g:pyclewn_args = "--args=-q --gdb=async 
+                \ --window=top --maxlines=10000 --background=Cyan,Green,Magenta"
+endif
+
 function! Pyclewnmap()
-    silent! nmap <tab> :C
-    exec "Cmapkeys"
-    silent! :execute "Cdbgvar"
-    :execute "only"
-    :rightbelow 35vsplit (clewn)_console
-    :set syntax=cpp
-    :wincmd h
-    " watch
-    :rightbelow 5split (clewn)_dbgvar
-    :set syntax=cpp
-    :wincmd k
+    silent! nnoremap <tab> :C
+    Cmapkeys
 endfunction
+
 function! Pyclewnunmap()
-    nmap <TAB> za
-    exec "silent! Cunmapkeys"
     silent!	bwipeout (clewn)_console
     silent!	bdelete (clewn)_console
-    silent! bwipeout (clewn)_dbgvar
+    silent! bwipeout (clewn)_variables
+    silent!	bdelete (clewn)_variables
+    silent! bwipeout (clewn)_breakpoints
+    silent!	bdelete (clewn)_breakpoints
+    silent! bwipeout (clewn)_backtrace
+    silent!	bdelete (clewn)_backtrace
+    silent! bwipeout (clewn)_threads
+    silent!	bdelete (clewn)_threads
     silent! ccl
     exec "silent! !killall inferior_tty.py"
 endfunction
-func! OpenClosedbgvar()
-    if bufexists("(clewn)_dbgvar")
-        silent! bwipeout (clewn)_dbgvar
-    else
-        :rightbelow 5split (clewn)_dbgvar
-        :set syntax=cpp
-    endif
-endfunc
-let g:openmenu_flag=0
+
 func! LoadProj()
     if filereadable(".proj")
         :silent! Pyclewn
@@ -72,22 +65,37 @@ func! LoadProj()
         :call Pyclewnmap()
     endif
 endfunc
-if s:is_linux==1
-    let g:pyclewn_args = "--args=-q --gdb=async --terminal=gnome-terminal,-x"
-else
-    let g:pyclewn_args = "--args=-q --gdb=async"
-endif
-silent!	nnoremap <leader>pw :silent! Cdbgvar <C-R><C-W><CR>
-au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> <space> :silent! exe "Cfoldvar " . line(".")<CR>
-au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> <c-d> 25<down>
-au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> <c-b> 25<up>
-au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> dd 0f]w:exec "Cdelvar " . expand('<cword>')<cr>
 
+"accept one argument,string that want to watch
+func! OpenClosedbgvar(watch_char)
+    if a:watch_char == ""
+        if bufexists("(clewn)_variables")
+            silent! bwipeout (clewn)_variables
+        else
+            bo 5split (clewn)_variables
+            set syntax=cpp
+            Cdbgvar
+        endif
+    else
+        if !bufexists("(clewn)_variables")
+            bo 5split (clewn)_variables
+            set syntax=cpp
+        endif
+        exec ":Cdbgvar ".a:watch_char
+    endif
+endfunc
+
+    
+nnoremap <leader>pw :call OpenClosedbgvar(expand('<cword>'))<cr>
 nnoremap <leader>ps :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
 nnoremap <leader>pp :call LoadProj()<cr>
 nnoremap <leader>pd :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>
 nnoremap <leader>pc :Cproject .proj<cr>
-"}}}
+au PyclewnGroup BufWinEnter (clewn)_variables nnoremap <buffer> <space> :silent! exe "Cfoldvar " . line(".")<CR>
+au PyclewnGroup BufWinEnter (clewn)_variables nnoremap <buffer> <c-d> 25<down>
+au PyclewnGroup BufWinEnter (clewn)_variables nnoremap <buffer> <c-b> 25<up>
+au PyclewnGroup BufWinEnter (clewn)_variables nnoremap <buffer> dd 0f]w:exec "Cdelvar " . expand('<cword>')<cr>
+"menu bar setting {{{
 amenu ToolBar.-Sep- :
 if s:is_linux==0
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgrun.bmp ToolBar.Run :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
@@ -98,11 +106,11 @@ if s:is_linux==0
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgstepi.bmp ToolBar.Stepi :Cstepi<cr>
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgrunto.bmp ToolBar.Runto :Ccontinue<cr>
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgstepout.bmp ToolBar.Finish :Cfinish<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgwindow.bmp ToolBar.Watch :call OpenClosedbgvar()<cr>
+    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgwindow.bmp ToolBar.Watch :call OpenClosedbgvar("")<cr>
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/project.bmp ToolBar.Project :silent! Pyclewn<cr>:call Pyclewnmap()<cr>:Csource .proj<cr>:Cstart<cr>
     amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/filesaveas.bmp ToolBar.SaveProject :Cproject .proj<cr>
 else
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgrun.png ToolBar.Run :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>:Cinferiortty<cr>
+    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgrun.png ToolBar.Run :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
     amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/run.png ToolBar.Start :Cstart<cr>
     amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgstop.png ToolBar.Quit :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>:call Pyclewnunmap()<cr>
     amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgnext.png ToolBar.Next :Cnext<cr>
@@ -110,8 +118,8 @@ else
     amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgstepi.png ToolBar.Stepi :Cstepi<cr>
     amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgrunto.png ToolBar.Runto :Ccontinue<cr>
     amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgstepout.png ToolBar.Finish :Cfinish<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgwindow.png ToolBar.Watch :call OpenClosedbgvar()<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/project.png ToolBar.Project :silent! Pyclewn<cr>:call Pyclewnmap()<cr>:Cinferiortty<cr>:Csource .proj<cr>:Cstart<cr>
+    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgwindow.png ToolBar.Watch :call OpenClosedbgvar("")<cr>
+    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/project.png ToolBar.Project :silent! Pyclewn<cr>:call Pyclewnmap()<cr>:Csource .proj<cr>:Cstart<cr>
     amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/filesaveas.png ToolBar.SaveProject :Cproject .proj<cr>
 endif
 tmenu ToolBar.Run Connect pyclewn-->Map keys-->Cfile <user input>
@@ -125,3 +133,4 @@ tmenu ToolBar.Watch Open or close watch windows
 tmenu ToolBar.Runto	Continue(Cconinue)
 tmenu ToolBar.Project Load project and start debug
 tmenu ToolBar.SaveProject Save Project setting(save as .proj)
+"}}}

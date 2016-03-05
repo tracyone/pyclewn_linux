@@ -1,24 +1,6 @@
 # vi:set ts=8 sts=4 sw=4 et tw=80:
-#
-# Copyright (C) 2007 Xavier de Gaye.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2, or (at your option)
-# any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program (see the file COPYING); if not, write to the
-# Free Software Foundation, Inc.,
-# 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA
-#
-
-"""The Simple class implements a simple debugger used for testing pyclewn and
+"""
+The Simple class implements a simple debugger used for testing pyclewn and
 for giving an example of a simple debugger.
 
 The debuggee is running in another thread as a Target instance. To display the
@@ -29,49 +11,51 @@ command, use continue instead.
 
 The quit command removes all the signs set by pyclewn in Vim. After the quit
 command, the dispatcher instantiates a new instance of Simple.
-
 """
+
+# Python 2-3 compatibility.
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import sys
 import threading
 import time
+import functools
+from collections import OrderedDict
 
-import clewn.misc as misc
-import clewn.debugger as debugger
-from clewn.misc import OrderedDict
+from . import (misc, debugger)
 
 # set the logging methods
 (critical, error, warning, info, debug) = misc.logmethods('simp')
-Unused = critical
-Unused = error
-Unused = warning
-Unused = debug
 
 # list of key mappings, used to build the .pyclewn_keys.simple file
 #     key : (mapping, comment)
 MAPKEYS = {
-    'C-B' : ('break ${fname}:${lnum}',
+    'C-B': ('break ${fname}:${lnum}',
                 'set breakpoint at current line'),
-    'C-E' : ('clear ${fname}:${lnum}',
+    'C-K': ('clear ${fname}:${lnum}',
                 'clear breakpoint at current line'),
-    'C-P' : ('print ${text}',
+    'C-P': ('print ${text}',
                 'print value of selection at mouse position'),
-    'C-Z' : ('interrupt',
+    'C-Z': ('interrupt',
                 'interrupt the execution of the target'),
-    'S-C' : ('continue',),
-    'S-Q' : ('quit',),
-    'S-S' : ('step',),
+    'S-C': ('continue',),
+    'S-Q': ('quit',),
+    'S-S': ('step',),
 }
 
 # list of the simple commands mapped to vim user commands C<command>
 SIMPLE_CMDS = {
-    'break'     : None,   # file name completion
-    'continue'  : (),
-    'disable'   : (),
-    'enable'    : (),
-    'interrupt' : (),
-    'print'     : (),
-    'quit'      : (),
-    'step'      : (),
+    'break': None,   # file name completion
+    'continue': (),
+    'disable': (),
+    'enable': (),
+    'interrupt': (),
+    'print': (),
+    'quit': (),
+    'step': (),
 }
 
 class Target(threading.Thread):
@@ -80,7 +64,6 @@ class Target(threading.Thread):
     TARGET_TIMEOUT = 0.100  # interruptible loop timer
 
     def __init__(self, daemon):
-        """Constructor."""
         threading.Thread.__init__(self)
         self.daemon = daemon
         self.bp = threading.Event()
@@ -89,8 +72,8 @@ class Target(threading.Thread):
         self.cnt = 0
 
         # do not print on stdout when running unittests
-        self.testrun = reduce(lambda x, y: x or (y == 'unittest2'),
-                                        [False] + sys.modules.keys())
+        self.testrun = functools.reduce(lambda x, y: x or (y == 'unittest'),
+                                        [False] + list(sys.modules.keys()))
 
     def close(self):
         """Close the target."""
@@ -129,10 +112,10 @@ class Target(threading.Thread):
         while not self.closed:
             if self.bp.isSet():
                 if self.cnt == 0 and not self.daemon and not self.testrun:
-                    print >> sys.stderr, 'Inferior starting.\n'
+                    print('Inferior starting.\n', file=sys.stderr)
                 self.cnt += 1
                 if not self.daemon and not self.testrun:
-                    print >> sys.stderr, 'value %d\n' % self.cnt
+                    print('value %d\n' % self.cnt, file=sys.stderr)
 
                 # end the step command, when not running
                 if not self.running:
@@ -158,7 +141,6 @@ class Varobj(object):
     """
 
     def __init__(self):
-        """Constructor."""
         self.var = OrderedDict()
         self.current = None
         self.hilite = False
@@ -176,20 +158,21 @@ class Varobj(object):
         size = len(self.var)
         if size == 0:
             return None
-        l = self.var.keys()
+        l = list(self.var.keys())
         try:
             i = (l.index(self.current) + 1) % size
             return l[i]
         except ValueError:
             return l[0]
 
-    def next(self):
+    def __next__(self):
         """Set next name to hilite and increment its value."""
         self.current = self._next()
         if self.current is not None:
             self.var[self.current] += 1
             self.hilite = True
             self.dirty = True
+    next = __next__
 
     def delete(self, name):
         """Delete a varobj."""
@@ -218,7 +201,7 @@ class Varobj(object):
     def __str__(self):
         """Return a string representation of the varobj."""
         varstr = ''
-        for (name, value) in self.var.iteritems():
+        for (name, value) in self.var.items():
             if name == self.current and self.hilite:
                 hilite = '*'
             else:
@@ -246,14 +229,13 @@ class Simple(debugger.Debugger):
     """
 
     def __init__(self, *args):
-        """Constructor."""
         debugger.Debugger.__init__(self, *args)
         self.pyclewn_cmds.update(
             {
-                'dbgvar':(),
-                'delvar':(),
-                'sigint':(),
-                'symcompletion':(),
+                'dbgvar': (),
+                'delvar': (),
+                'sigint': (),
+                'symcompletion': (),
             })
         self.cmds.update(SIMPLE_CMDS)
         self.mapkeys.update(MAPKEYS)
@@ -270,7 +252,7 @@ class Simple(debugger.Debugger):
 
         # start the debuggee
         if self.inferior is None:
-            self.inferior = Target(self.options.daemon)
+            self.inferior = Target(self.vim.options.daemon)
             self.inferior.start()
 
     def close(self):
@@ -296,7 +278,7 @@ class Simple(debugger.Debugger):
             self.show_frame(self.step_bufname, self.lnum + 1)
             self.lnum += 1
             self.lnum %= min(lnum_list)
-            self.varobj.next()
+            next(self.varobj)
         else:
             # hide frame
             self.show_frame()
@@ -316,19 +298,15 @@ class Simple(debugger.Debugger):
 
     def post_cmd(self, cmd, args):
         """The method called after each invocation of a 'cmd_xxx' method."""
-        unused = cmd
-        unused = args
         # to preserve window order appearance, all the writing to the
-        # console must be done before starting to handle the (clewn)_dbgvar
+        # console must be done before starting to handle the (clewn)_variables
         # buffer when processing Cdbgvar
         # update the vim debugger variable buffer with the variables values
         varobj = self.varobj
-        self.update_dbgvarbuf(varobj.__str__, varobj.dirty)
+        self.update_listbuffer('variables', varobj.__str__, varobj.dirty)
 
     def default_cmd_processing(self, cmd, args):
         """Process any command whose cmd_xxx method does not exist."""
-        unused = cmd
-        unused = args
         self.console_print('Command ignored.\n')
         self.print_prompt()
 
@@ -338,7 +316,6 @@ class Simple(debugger.Debugger):
         The required argument of the vim user command is 'fname:lnum'.
 
         """
-        unused = cmd
         result = 'Invalid arguments.\n'
 
         name, lnum = debugger.name_lnum(args)
@@ -360,7 +337,6 @@ class Simple(debugger.Debugger):
 
     def cmd_dbgvar(self, cmd, args):
         """Add a variable to the debugger variable buffer."""
-        unused = cmd
         args = args.split()
         # two arguments are required
         if len(args) != 2:
@@ -371,7 +347,6 @@ class Simple(debugger.Debugger):
 
     def cmd_delvar(self, cmd, args):
         """Delete a variable from the debugger variable buffer."""
-        unused = cmd
         args = args.split()
         # one argument is required
         if len(args) != 1:
@@ -387,7 +362,6 @@ class Simple(debugger.Debugger):
 
     def set_bpstate(self, cmd, args, enable):
         """Change the state of one breakpoint."""
-        unused = cmd
         args = args.split()
         result = 'Invalid arguments.\n'
 
@@ -423,14 +397,12 @@ class Simple(debugger.Debugger):
 
     def cmd_print(self, cmd, args):
         """Print a value."""
-        unused = cmd
         if args:
             self.console_print('%s\n', args)
         self.print_prompt()
 
     def cmd_step(self, *args):
         """Step program until it reaches a different source line."""
-        unused = args
         assert self.inferior is not None
         if not self.get_lnum_list(self.step_bufname):
             self.console_print('No breakpoint enabled at %s.\n', self.step_bufname)
@@ -444,7 +416,6 @@ class Simple(debugger.Debugger):
 
     def cmd_continue(self, *args):
         """Continue the program being debugged, also used to start the program."""
-        unused = args
         assert self.inferior is not None
         if not self.get_lnum_list(self.step_bufname):
             self.console_print('No breakpoint enabled at %s.\n', self.step_bufname)
@@ -456,7 +427,6 @@ class Simple(debugger.Debugger):
 
     def cmd_interrupt(self, *args):
         """Interrupt the execution of the debugged program."""
-        unused = args
         assert self.inferior is not None
         if self.inferior.interrupt():
             self.move_frame(True)
@@ -464,21 +434,16 @@ class Simple(debugger.Debugger):
 
     def cmd_quit(self, *args):
         """Quit the current simple session."""
-        unused = args
         self.varobj.clear()
         self.close()
 
     def cmd_sigint(self, *args):
         """Send a <C-C> character to the debugger (not implemented)."""
-        unused = self
-        unused = args
         self.console_print('Not implemented.\n')
         self.print_prompt()
 
     def cmd_symcompletion(self, *args):
         """Populate the break and clear commands with symbols completion (not implemented)."""
-        unused = self
-        unused = args
         self.console_print('Not implemented.\n')
         self.print_prompt()
 

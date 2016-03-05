@@ -1,37 +1,19 @@
 # vi:set ts=8 sts=4 sw=4 et tw=80:
-#
-# Copyright (C) 2007 Xavier de Gaye.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2, or (at your option)
-# any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program (see the file COPYING); if not, write to the
-# Free Software Foundation, Inc.,
-# 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA
-#
-
-"""Contain classes that implement the gdb commands.
+"""
+Contain classes that implement the gdb commands.
 
 A Gdb command may be an:
     * instance of CliCommand
     * instance of MiCommand
-    * instance of WhatIs
-A Gdb command triggers execution of out of band (oob) commands.
+    * instance of ShowBalloon
+The first two types trigger execution of out of band (oob) commands.
 
 An oob command may be an:
     * instance of OobCommand
     * instance of VarObjCmd
-    * instance of ShowBalloon
-OobCommand instances are part of a static list in OobList, while VarObjCmd and
-ShowBalloon instances are pushed into this list dynamically.
+The difference between both types is that OobCommand instances are part of a
+static list in OobList, while VarObjCmd instances are pushed into this list
+dynamically.
 
 The oob commands fetch from gdb, using gdb/mi, the information required to
 maintain the state of the breakpoints table, the varobj data, ...
@@ -39,26 +21,35 @@ The instance of the Info class contains all this data.
 
 The oob commands also perform actions such as: source the project file, update
 the breakpoints and frame sign, create/delete/update the varobj objects.
-
 """
 
-import os
-import os.path
-import re
-import cStringIO
-import collections
+# Python 2-3 compatibility.
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from io import open
 
-import clewn.misc as misc
+import sys
+import os
+import re
+import io
+import traceback
+import collections
+from abc import ABCMeta, abstractmethod
+from collections import OrderedDict
+
+from . import PY3, text_type, misc
 
 # set the logging methods
 (critical, error, warning, info, debug) = misc.logmethods('mi')
-Unused = critical
 
 VAROBJ_FMT = '%%(name)-%ds: (%%(type)-%ds) %%(exp)-%ds %%(chged)s %%(value)s\n'
 
 BREAKPOINT_CMDS = ()
 FILE_CMDS = ()
 FRAME_CMDS = ()
+THREADS_CMDS = ()
 VARUPDATE_CMDS = ()
 
 DIRECTORY_CMDS = (
@@ -70,30 +61,31 @@ SOURCE_CMDS = (
     'file', 'exec-file', 'core-file', 'symbol-file', 'add-symbol-file',
     'source')
 
-PROJECT_CMDS = tuple(['project'] + list(SOURCE_CMDS))
+# Need to know the list of sources to build the breakpoint full pathname.
+SOURCE_CMDS_EXTRA = ('break', 'tbreak', 'hbreak', 'thbreak', 'rbreak')
 
-# gdb objects attributes
-BREAKPOINT_ATTRIBUTES = set(('number', 'type', 'enabled', 'what', 'file',
-                            'line', 'original-location'))
-REQ_BREAKPOINT_ATTRIBUTES = set(('number', 'type', 'enabled'))
-FILE_ATTRIBUTES = set(('line', 'file', 'fullname'))
-FRAMECLI_ATTRIBUTES = set(('level', 'func', 'file', 'line',))
-FRAME_ATTRIBUTES = set(('level', 'func', 'file', 'line', 'fullname',))
-SOURCES_ATTRIBUTES = set(('file', 'fullname'))
-VARUPDATE_ATTRIBUTES = set(('name', 'in_scope'))
-VARCREATE_ATTRIBUTES = set(('name', 'numchild', 'type'))
-VARLISTCHILDREN_ATTRIBUTES = set(('name', 'exp', 'numchild', 'value', 'type'))
-VAREVALUATE_ATTRIBUTES = set(('value',))
+PROJECT_CMDS = ('project',) + SOURCE_CMDS
+
+# gdb objects attributes.
+BREAKPOINT_ATTRIBUTES = {'number', 'type', 'disp', 'enabled', 'func', 'file',
+                         'line', 'times', 'original-location', 'what'}
+REQ_BREAKPOINT_ATTRIBUTES = {'number', 'type', 'enabled'}
+FILE_ATTRIBUTES = {'line', 'file', 'fullname'}
+FRAMECLI_ATTRIBUTES = {'level', 'func', 'file', 'line', }
+FRAME_ATTRIBUTES = {'level', 'func', 'file', 'fullname', 'line', 'from',  }
+REQ_FRAME_ATTRIBUTES = {'level', }
+THREADS_ATTRIBUTES = {'current', 'id', 'target-id', 'name', 'state', 'core', }
+SOURCES_ATTRIBUTES = {'file', 'fullname'}
+VARUPDATE_ATTRIBUTES = {'name', 'in_scope'}
+VARCREATE_ATTRIBUTES = {'name', 'numchild', 'type'}
+VARLISTCHILDREN_ATTRIBUTES = {'name', 'exp', 'numchild', 'value', 'type'}
+VAREVALUATE_ATTRIBUTES = {'value'}
 
 def keyval_pattern(attributes, comment=''):
     """Build and return a keyval pattern string."""
-    unused = comment
     return '(' + '|'.join(attributes) + ')=' + misc.QUOTED_STRING
 
 # regexp
-RE_COMPLETION = r'^break\s*(?P<sym>[\w:]*)(?P<sig>\(.*\))?(?P<rest>.*)$'    \
-                r'# break symbol completion'
-
 RE_EVALUATE = r'^done,value="(?P<value>.*)"$'                               \
               r'# result of -data-evaluate-expression'
 
@@ -129,6 +121,23 @@ RE_FRAMECLI = keyval_pattern(FRAMECLI_ATTRIBUTES,
             '{name="argv",value="0xbfde84a4"}],file="foobar.c",line="12"}')
 RE_FRAME = keyval_pattern(FRAME_ATTRIBUTES)
 
+# Output of '-thread-info':
+# '{id="2",target-id="Thread 0x7ffff6bd9700 (LWP # 3820)",name="python",
+#   frame={level="0",addr="0x00007ffff7bcd920",func="sem_wait",args=[],
+#     from="/usr/lib/libpthread.so.0"},
+#   state="stopped",core="2"},
+# {id="1",target-id="Thread 0x7ffff7fce700 (LWP # 3816)",name="python",
+#   frame={level="0",addr="0x0000000000432e77",func="sys_getrecursionlimit",
+#     args=[{name="self",value="0x7ffff70ec7d8"}],
+#     file="./Python/sysmodule.c",
+#     fullname="/home/xavier/src/python/cpython-hg-default/Python/sysmodule.c",
+#     line="726"}
+#   ,state="stopped",core="3"}],
+# current-thread-id="1"]'
+RE_THREADS = '({[^{]+{[^}]*args=\[[^]]*\][^}]*}[^}]*})|current-thread-id="(\d+)"'
+
+RE_THREADS_ATTRIBUTES = keyval_pattern(THREADS_ATTRIBUTES)
+
 RE_PGMFILE = r'\s*"(?P<debuggee>[^"]+)"\.'                                  \
              r'# "/path/to/pyclewn/testsuite/foobar".'
 
@@ -142,11 +151,7 @@ RE_VARUPDATE = keyval_pattern(VARUPDATE_ATTRIBUTES,
             'changelist='
             '[{name="var3.key",in_scope="true",type_changed="false"}]')
 
-RE_TYPE = r'^type\s=\s(?P<name>\w+).*?[^*]?(?P<star>\*+)$'                  \
-          r'# "type = char *".'
-
 # compile regexps
-re_completion = re.compile(RE_COMPLETION, re.VERBOSE)
 re_evaluate = re.compile(RE_EVALUATE, re.VERBOSE)
 re_dict_list = re.compile(RE_DICT_LIST, re.VERBOSE)
 re_varcreate = re.compile(RE_VARCREATE, re.VERBOSE)
@@ -160,35 +165,40 @@ re_directories = re.compile(RE_DIRECTORIES, re.VERBOSE)
 re_file = re.compile(RE_FILE, re.VERBOSE)
 re_framecli = re.compile(RE_FRAMECLI, re.VERBOSE)
 re_frame = re.compile(RE_FRAME, re.VERBOSE)
+re_threads = re.compile(RE_THREADS)
+re_threads_attributes = re.compile(RE_THREADS_ATTRIBUTES)
 re_pgmfile = re.compile(RE_PGMFILE, re.VERBOSE)
 re_pwd = re.compile(RE_PWD, re.VERBOSE)
 re_sources = re.compile(RE_SOURCES, re.VERBOSE)
 re_varupdate = re.compile(RE_VARUPDATE, re.VERBOSE)
-re_type = re.compile(RE_TYPE, re.VERBOSE)
 
-def compare_filename(a, b):
-    """Compare two filenames."""
-    if os.name == 'nt':
-        return a.lower() == b.lower()
-    else:
-        return a == b
+def get_pathname(name, source):
+    """Return a valid path name, matching name in the source dictionary."""
+    if source:
+        pathname = source['fullname'] if source['file'] == name else ''
+        if pathname and os.path.exists(pathname):
+            return pathname
 
-def fullname(name, source_dict):
-    """Return 'fullname' value, matching name in the source_dict dictionary."""
-    try:
-        if source_dict and compare_filename(source_dict['file'], name):
-            return source_dict['fullname']
-    except KeyError:
-        pass
-    return ''
+def fix_bp_attributes(bp):
+    if 'line' not in bp or 'file' not in bp:
+        # When file/line is missing (a template function), use the
+        # original-location.
+        if 'original-location' in bp:
+            oloc = bp['original-location']
+            if ':' in oloc:
+                fn, lno = oloc.rsplit(':', 1)
+                bp['file'] = fn.strip(misc.DOUBLEQUOTE)
+                bp['line'] = lno
+            elif 'func' not in bp:
+                bp['func'] = oloc
 
-class VarObjList(misc.OrderedDict):
+class VarObjList(OrderedDict):
     """A dictionary of {name:VarObj instance}."""
 
     def collect(self, parents, lnum, stream, indent=0):
         """Collect all varobj children data.
 
-        Return True when dbgvarbuf must be set as dirty
+        Return True when the Variables buffer must be set as dirty
         for the next update run (for syntax highlighting).
 
         """
@@ -225,7 +235,6 @@ class RootVarObj(object):
     """
 
     def __init__(self):
-        """Constructor."""
         self.root = VarObjList()
         self.parents = {}
         self.dirty = False
@@ -238,13 +247,12 @@ class RootVarObj(object):
 
         """
         if not self.root:
-            return False
-
-        self.root.clear()
-        self.parents = {}
-        self.dirty = True
-        self.str_content = ''
-        return True
+            self.dirty = False
+        else:
+            self.root.clear()
+            self.parents = {}
+            self.dirty = True
+            self.str_content = ''
 
     def leaf(self, childname):
         """Return childname VarObj and the VarObjList of the parent of childname.
@@ -277,7 +285,7 @@ class RootVarObj(object):
             self.dirty = False
             self.parents = {}
             lnum = [0]
-            output = cStringIO.StringIO()
+            output = io.StringIO()
             self.dirty = self.root.collect(self.parents, lnum, output)
             self.str_content = output.getvalue()
             output.close()
@@ -287,7 +295,6 @@ class VarObj(dict):
     """A gdb/mi varobj object."""
 
     def __init__(self, vardict={}):
-        """Constructor."""
         self['name'] = ''
         self['exp'] = ''
         self['type'] = ''
@@ -330,6 +337,12 @@ class VarObj(dict):
 
         return dirty
 
+class LooseFrame(dict):
+    """Compare equal when only their 'line', 'addr' is different."""
+    def __eq__(self, other):
+        return set(other) == set(self) and all(other[x] == self[x]
+               for x in self if x not in ('line', 'addr'))
+
 class Info(object):
     """Container for the debuggee state information.
 
@@ -345,6 +358,8 @@ class Info(object):
             list of breakpoints, result of a previous OobGdbCommand
         bp_dictionary: dict
             breakpoints dictionary, with bp number as key
+        bp_dirty: boolean
+            True when the breakpoints have changed
         cwd: list
             current working directory
         debuggee: list
@@ -355,10 +370,20 @@ class Info(object):
             current gdb source attributes
         frame: dict
             gdb frame attributes
-        frame_location: dict
-            current frame location
+        prev_frame: dict
+            previous frame
         frame_prefix: str
             completion prefix for the 'frame' command
+        backtrace: dict
+            the backtrace
+        backtrace_dirty: boolean
+            True when the backtrace has changed
+        threads_list: list
+            list of the gdb representation of a thread
+        threads: dict
+            the threads
+        threads_dirty: boolean
+            True when the threads have changed
         sources: list
             list of gdb sources
         varobj: RootVarObj
@@ -369,18 +394,23 @@ class Info(object):
     """
 
     def __init__(self, gdb):
-        """Constructor."""
         self.gdb = gdb
         self.args = []
         self.breakpoints = []
         self.bp_dictionary = {}
+        self.bp_dirty = False
         self.cwd = []
         self.debuggee = []
         self.directories = ['$cdir', '$cwd']
         self.file = {}
         self.frame = {}
-        self.frame_location = {}
+        self.prev_frame = {}
         self.frame_prefix = ''
+        self.backtrace = {}
+        self.backtrace_dirty = False
+        self.threads_list = []
+        self.threads = {}
+        self.threads_dirty = False
         self.sources = []
         self.varobj = RootVarObj()
         self.changelist = []
@@ -392,153 +422,261 @@ class Info(object):
 
         If name is an absolute path, just stat it. Otherwise, add name to
         each directory in gdb source directories and stat the result.
-        Path names are unix normalized with forward slashes.
         """
 
-        # an absolute path name
+        # An absolute path name.
         if os.path.isabs(name):
             if os.path.exists(name):
-                return misc.norm_unixpath(name, True)
+                return name
             else:
-                # strip off the directory part and continue
+                # Strip off the directory part and continue.
                 name = os.path.split(name)[1]
 
         if not name:
             return None
 
-        # proceed with each directory in gdb source directories
+        # Proceed with each directory in gdb source directories.
         for dirname in self.directories:
             if dirname == '$cdir':
-                pathname = fullname(name, self.file)
-                if not pathname:
-                    for source_dict in self.sources:
-                        pathname = fullname(name, source_dict)
-                        if pathname:
-                            break
-                    else:
-                        continue # main loop
+                pathname = get_pathname(name, self.file)
+                if pathname:
+                    return pathname
+                for source in self.sources:
+                    pathname = get_pathname(name, source)
+                    if pathname:
+                        return pathname
             elif dirname == '$cwd':
                 pathname = os.path.abspath(name)
+                if os.path.exists(pathname):
+                    return pathname
             else:
-                pathname = os.path.normpath(name)
+                pathname = os.path.join(dirname, name)
+                if os.path.exists(pathname):
+                    return pathname
 
-            if os.path.exists(pathname):
-                return misc.norm_unixpath(pathname, True)
+    def collect_breakpoints(self):
+        self.bp_dirty = False
+        lines = []
+        for num in sorted(self.bp_dictionary.keys()):
+            bp = self.bp_dictionary[num]
+            line = (('%-4s' % num) +
+                    (' %(type)-15s %(enabled)-3s %(times)-5s '
+                     '%(disp)-6s' % bp))
+            if 'watchpoint' in bp['type']:
+                if 'what' in bp:
+                    line += bp['what']
+            else:
+                if 'func' in bp:
+                    line += ' in %(func)s' % bp
+                if 'line' in bp and 'file' in bp:
+                    lnum = bp['line']
+                    fname = bp['file']
+                    line += ' at %s:%s' % (fname, lnum)
+                    pathname = self.get_fullpath(fname)
+                    if pathname is not None:
+                        line += ' <%s>' % pathname
+            lines.append(line)
 
-        return None
+        if lines:
+            lines.insert(0, 'Num  Type            Enb Hit   Disp   What')
+            return '\n'.join(lines) + '\n'
+        else:
+            return ''
 
-    def update_breakpoints(self, cmd):
+    def update_breakpoints(self, cmd=''):
         """Update the breakpoints."""
-        unused = cmd
-        is_changed = False
-
-        # build the breakpoints dictionary
+        # Build the breakpoints dictionary.
         bp_dictionary = {}
         for bp in self.breakpoints:
-            if ('breakpoint' in bp['type']
-                    # exclude 'throw' and 'catch 'catchpoints (they are typed by
-                    # gdb as 'breakpoint' instead of 'catchpoint')
+            if (('breakpoint' in bp['type']
+                    # Exclude 'throw' and 'catch 'catchpoints (they are typed by
+                    # gdb as 'breakpoint' instead of 'catchpoint').
                     and not
-                        ('what' in bp and 'exception' in bp['what'])):
-                bp_dictionary[bp['number']] = bp
+                        ('what' in bp and 'exception' in bp['what'])) or
+                    'watchpoint' in bp['type']):
+                bp_dictionary[int(bp['number'])] = bp
 
         nset = set(bp_dictionary.keys())
         oldset = set(self.bp_dictionary.keys())
-        # update sign status of common breakpoints
+        # Update the state of common breakpoints.
         for num in (nset & oldset):
-            state = bp_dictionary[num]['enabled']
-            if state != self.bp_dictionary[num]['enabled']:
-                is_changed = True
-                enabled = (state == 'y')
-                self.gdb.update_bp(int(num), not enabled)
+            bp = bp_dictionary[num]
+            old_bp = self.bp_dictionary[num]
+            if 'watchpoint' not in bp['type']:
+                fix_bp_attributes(bp)
+            state = bp['enabled']
+            if state != old_bp['enabled']:
+                self.bp_dirty = True
+                if ('watchpoint' not in bp['type'] and 'line' in old_bp and
+                        'file' in old_bp):
+                    enabled = (state == 'y')
+                    self.gdb.update_bp(num, not enabled)
+            if bp['times'] != old_bp['times']:
+                self.bp_dirty = True
 
-        # delete signs for non-existent breakpoints
+        # Delete signs for non-existent breakpoints.
         for num in (oldset - nset):
-            number = int(self.bp_dictionary[num]['number'])
-            self.gdb.delete_bp(number)
+            bp = self.bp_dictionary[num]
+            if 'watchpoint' in bp['type']:
+                continue
+            if 'line' in bp and 'file' in bp:
+                self.gdb.delete_bp(num)
 
-        # create signs for new breakpoints
+        # Create signs for the new breakpoints.
         for num in sorted(nset - oldset):
-            # when file/line is missing (template function), use the
-            # original-location
-            if ('line' not in bp_dictionary[num]
-                    and 'file' not in bp_dictionary[num]):
-                try:
-                    fn, lno = (
-                        bp_dictionary[num]['original-location'].rsplit(':', 1))
-                except ValueError, err:
-                    error(repr(err))
-                    error('breakpoint %s ignored:'
-                            ' cannot split "original-location"', num)
-                    del bp_dictionary[num]
-                    continue
-                bp_dictionary[num]['file'] = fn.strip(misc.DOUBLEQUOTE)
-                bp_dictionary[num]['line'] = lno
-
-            pathname = self.get_fullpath(bp_dictionary[num]['file'])
-            if pathname is not None:
-                lnum = int(bp_dictionary[num]['line'])
-                self.gdb.add_bp(int(num), pathname, lnum)
+            bp = bp_dictionary[num]
+            if 'watchpoint' in bp['type']:
+                continue
+            fix_bp_attributes(bp)
+            if 'line' in bp and 'file' in bp:
+                pathname = self.get_fullpath(bp['file'])
+                if pathname is not None:
+                    lnum = int(bp['line'])
+                    self.gdb.add_bp(num, pathname, lnum)
 
         self.bp_dictionary = bp_dictionary
 
         if (oldset - nset) or (nset - oldset):
-            is_changed = True
-        if is_changed:
-            f_bps = open(self.gdb.globaal.f_bps.name, 'w')
-            for num in sorted(bp_dictionary.keys()):
-                pathname = self.get_fullpath(bp_dictionary[num]['file'])
+            self.bp_dirty = True
+
+    def collect_backtrace(self):
+        self.backtrace_dirty = False
+        flevel = self.frame.get('level')
+        lines = []
+        for f in self.backtrace:
+            curlevel = f['level']
+            line = '* #%-3s' if curlevel == flevel else '  #%-3s'
+            line = line % curlevel
+            if 'func' in f:
+                line += ' in %s' % f['func']
+            elif 'from' in f:
+                line += ' from %s' % f['from']
+            # Do not display the line number to avoid screen blinks.
+            if 'file' in f:
+                fname = f['file']
+                line += ' at %s' % fname
+                pathname = self.get_fullpath(fname)
                 if pathname is not None:
-                    lnum = bp_dictionary[num]['line']
-                    state = bp_dictionary[num]['enabled']
-                    if state == 'y':
-                        state = 'enabled'
-                    else:
-                        state = 'disabled'
-                    f_bps.write('%s:%s:breakpoint %s %s\n'
-                                        % (pathname, lnum, num, state))
-            f_bps.close()
+                    line += ' <%s>' % pathname
+            lines.append(line)
 
-    def update_frame(self, cmd='', hide=False):
+        if lines:
+            return '\n'.join(lines) + '\n'
+        else:
+            return ''
+
+    def update_frame(self, cmd=''):
         """Update the frame sign."""
-        if hide:
-            self.frame = {}
-        if self.frame and isinstance(self.frame, dict):
-            line = int(self.frame['line'])
-            # gdb 6.4 and above
-            if 'fullname' in self.frame:
-                source = self.frame['fullname']
-            else:
-                fullname = self.file['fullname']
-                source = self.frame['file']
-                if os.path.basename(fullname) == source:
-                    source = fullname
-            pathname = self.get_fullpath(source)
+        self.frame = LooseFrame(self.frame)
+        try:
+            if self.prev_frame != self.frame:
+                self.backtrace_dirty = True
+            if 'line' in self.frame:
+                f = self.frame
+                line = int(f['line'])
+                # gdb 6.4 and above.
+                if 'fullname' in f:
+                    fname = f['fullname']
+                else:
+                    fullname = self.file.get('fullname')
+                    fname = f.get('file')
+                    if (fname and fullname and
+                            os.path.basename(fullname) == fname):
+                        fname = fullname
+                pathname = self.get_fullpath(fname) if fname else None
+                if pathname:
+                    if not self.frame_prefix:
+                        keys = list(self.gdb.cmds.keys())
+                        keys.remove('frame')
+                        self.frame_prefix = misc.smallpref_inlist('frame',
+                                                                   keys)
+                    if (self.prev_frame != self.frame or
+                                cmd.startswith(self.frame_prefix)):
+                        self.gdb.show_frame(pathname, line)
+                    return
 
-            if pathname is not None:
-                frame_location = {'pathname':pathname, 'lnum':line}
-                if not self.frame_prefix:
-                    keys = self.gdb.cmds.keys()
-                    keys.remove('frame')
-                    self.frame_prefix = misc.smallpref_inlist('frame', keys)
-                # when the frame location has changed or when running the
-                # 'frame' command
-                if (self.frame_location != frame_location or
-                            cmd.startswith(self.frame_prefix)):
-                    self.gdb.show_frame(**frame_location)
-                    self.frame_location = frame_location
-                return
+            self.hide_frame()
+        finally:
+            self.prev_frame = self.frame
 
-        # hide frame sign
+    def hide_frame(self):
+        if self.prev_frame:
+            self.prev_frame = {}
+            self.backtrace_dirty = True
+            self.backtrace = {}
         self.gdb.show_frame()
-        self.frame_location = {}
+
+    def collect_threads(self):
+        self.threads_dirty = False
+        lines = []
+        for id in sorted(self.threads):
+            thread = self.threads[id]
+            if 'name' not in thread:
+                thread['name'] = ''
+            line = ('%(current)s %(id)-3s %(name)-16s %(state)-7s'
+                    ' %(target-id)s' % thread)
+            if 'frame' in thread:
+                f = thread['frame']
+                if 'func' in f:
+                    line += ' in %s' % f['func']
+                elif 'from' in f:
+                    line += ' from %s' % f['from']
+                # Do not display the line number to avoid screen blinks.
+                if 'file' in f:
+                    line += ' at %s' % f['file']
+            lines.append(line)
+
+        if lines:
+            lines.insert(0, '  Id  Name             State   Info')
+            return '\n'.join(lines) + '\n'
+        else:
+            return ''
+
+    def update_threads(self, cmd=''):
+        threads = {}
+        current = None
+        # Parse the threads_list and build a new threads dictionary.
+        for sthread, current in self.threads_list:
+            if not sthread:
+                continue
+            sframe = ''
+            lthread = sthread[1:-1].split('frame={', 1)
+            if len(lthread) == 2:
+                remain = lthread[1].rsplit('}', 1)
+                sthread = lthread[0].strip(' ,') + remain[1]
+                sframe = remain[0]
+            else:
+                sthread = lthread[0]
+            thread = misc.parse_keyval(re_threads_attributes, sthread)
+            if 'current' not in thread:
+                thread['current'] = ' '
+            if sframe:
+                if self.gdb.version >= [6, 4]:
+                    frame = misc.parse_keyval(re_frame, sframe)
+                else:
+                    frame = misc.parse_keyval(re_framecli, sframe)
+                thread['frame'] = LooseFrame(frame)
+
+            try:
+                threads[int(thread['id'])] = thread
+            except (ValueError, KeyError):
+                error('invalid thread id %s', thread)
+
+        if current is not None:
+            try:
+                threads[int(current)]['current'] = '*'
+            except (ValueError, KeyError):
+                error('unknown current-thread-id %s', current)
+
+        # Check if the threads have changed.
+        if threads != self.threads:
+            self.threads_dirty = True
+        self.threads = threads
 
     def update_changelist(self, cmd):
         """Process a varobj changelist event."""
-        unused = cmd
         for vardict in self.changelist:
             (varobj, varlist) = self.varobj.leaf(vardict['name'])
-            unused = varlist
             if varobj is not None:
                 varobj['in_scope'] = vardict['in_scope']
                 self.gdb.oob_list.push(VarObjCmdEvaluate(self.gdb, varobj))
@@ -562,7 +700,6 @@ class Result(dict):
     """
 
     def __init__(self):
-        """Constructor."""
         self.token = 100
 
     def add(self, command):
@@ -571,7 +708,7 @@ class Result(dict):
         # do not add an OobGdbCommand if the dictionary contains
         # an object of the same class
         if isinstance(command, OobGdbCommand)  \
-                and misc.any([command.__class__ is obj.__class__
+                and any([command.__class__ is obj.__class__
                         for obj in self.values()]):
             return None
         t = str(self.token)
@@ -613,23 +750,23 @@ class OobList(object):
     """
 
     def __init__(self, gdb):
-        """Constructor."""
         self.running_list = []
         self.fifo = None
 
-        # build the OobCommand objects list
-        # object ordering is important
+        # Build the OobCommand objects list, object ordering is important.
         cmdlist = [
             Args(gdb),
             Directories(gdb),
             File(gdb),
-            FrameCli(gdb),      # after File
+            FrameCli(gdb),      # After File.
             Frame(gdb),
+            BackTrace(gdb),     # After Frame.
+            Threads(gdb),
             PgmFile(gdb),
-            VarUpdate(gdb),     # not last after gdb 7.0
+            VarUpdate(gdb),     # Not last after gdb 7.0.
             Pwd(gdb),
             Sources(gdb),
-            Breakpoints(gdb),   # after File and Sources
+            Breakpoints(gdb),   # After File and Sources.
             Project(gdb),
             Quit(gdb),
         ]
@@ -654,21 +791,22 @@ class OobList(object):
         self.running_list = []
         return self
 
-    def next(self):
+    def __next__(self):
         """Iterator next method."""
         if self.fifo is not None and len(self.fifo):
             return self.fifo.popleft()
         else:
             self.fifo = None
             raise StopIteration
+    next = __next__
 
     def push(self, obj):
-        """Push a Command object.
+        """Push a VarObjCmd object.
 
         When the iterator is not running, push the object to the
         running_list (as a result of a dbgvar, delvar or foldvar command).
         """
-        assert callable(obj)
+        assert isinstance(obj, VarObjCmd)
         if self.fifo is not None:
             self.fifo.append(obj)
         else:
@@ -685,22 +823,19 @@ class Command(object):
 
     """
 
+    __metaclass__ = ABCMeta
+
     def __init__(self, gdb):
-        """Constructor."""
         self.gdb = gdb
         self.stream_record = ''
 
+    @abstractmethod
     def handle_result(self, result):
         """Process the result of the gdb command."""
-        unused = self
-        unused = result
-        raise NotImplementedError('must be implemented in subclass')
 
+    @abstractmethod
     def handle_strrecord(self, stream_record):
         """Process the stream records output by the command."""
-        unused = self
-        unused = stream_record
-        raise NotImplementedError('must be implemented in subclass')
 
     def send(self, fmt, *args):
         """Send the command and add oneself to the expected pending results."""
@@ -715,31 +850,21 @@ class Command(object):
 class CliCommand(Command):
     """All cli commands."""
 
-    def sendcmd(self, cmd):
+    def sendcmd(self, cmd, verbose=True):
         """Send a cli command."""
         if not self.gdb.accepting_cmd():
-            self.gdb.console_print(
-                    "gdb busy: command discarded, please retry\n")
+            if verbose:
+                self.gdb.console_print(
+                        "gdb busy: command discarded, please retry\n")
             return False
 
         self.gdb.gdb_busy = True
-        cmd = misc.norm_unixpath(cmd)
         self.stream_record = ''
         return self.send('-interpreter-exec console %s\n', misc.quote(cmd))
 
     def handle_result(self, line):
-        """Handle gdb/mi result, print an error message."""
-        errmsg = 'error,msg='
-        if line.startswith(errmsg):
-            line = line[len(errmsg):]
-            matchobj = misc.re_quoted.match(line)
-            if matchobj:
-                line = misc.unquote(matchobj.group(1))
-                # do not repeat the log stream record
-                if line + '\n' != self.stream_record:
-                    self.gdb.console_print('%s\n' % line)
-                return
-        info(line)
+        """Handle gdb/mi result."""
+        warning('CliCommand gdb/mi result: %s', line)
 
     def handle_strrecord(self, stream_record):
         """Process the stream records output by the command."""
@@ -750,58 +875,41 @@ class CliCommandNoPrompt(CliCommand):
     """The prompt is printed by one of the OobCommands."""
     pass
 
-class CompleteBreakCommand(CliCommand):
-    """CliCommand sent to get the symbols completion list."""
+class CompleteCommand(CliCommand):
+    """Get the gdb completion."""
 
-    def sendcmd(self, cmd=''):
+    def sendcmd(self, args):
         """Send the gdb command."""
-        unused = cmd
-        if not CliCommand.sendcmd(self, 'complete break '):
-            self.handle_strrecord('')
-            return False
-        return True
+        # Set the prefix to remove from gdb answer.
+        arglead = args.rsplit(None, 1)
+        if len(arglead) != 2:
+            # A gdb command terminated with white space(s) else a completion
+            # whith an empty command such as 'C brea'.
+            self.prefix = args if len(args.rstrip()) != len(args) else ''
+        else:
+            idx = args.rfind(arglead[1])
+            self.prefix = args[:idx]
+
+        if not CliCommand.sendcmd(self, 'complete %s' % args, verbose=False):
+            with open(self.gdb.globaal.f_ack.name, 'w') as f:
+                f.write('Nok\n')
+
+    def handle_result(self, result):
+        if result == 'done':
+            plen = len(self.prefix)
+            completion = '\n'.join(l[plen:]
+                                   for l in self.stream_record.splitlines()
+                                   if l.find(self.prefix) == 0)
+
+            with open(self.gdb.globaal.f_clist.name, 'w') as f:
+                f.write(completion)
+
+            with open(self.gdb.globaal.f_ack.name, 'w') as f:
+                result = 'Ok\n' if completion else 'Nok\n'
+                f.write(result)
 
     def handle_strrecord(self, stream_record):
-        """Process the gdb/mi stream records."""
-        f_clist = f_ack = None
-        try:
-            if not stream_record:
-                f_ack = open(self.gdb.globaal.f_ack.name, 'w')
-                f_ack.write('Nok\n')
-                self.gdb.console_print(
-                        'Break and clear completion not changed.\n')
-            else:
-                invalid = 0
-                f_clist = open(self.gdb.globaal.f_clist.name, 'w')
-                completion_list = stream_record.splitlines()
-                for result in completion_list:
-                    matchobj = re_completion.match(result)
-                    if matchobj:
-                        symbol = matchobj.group('sym')
-                        signature = matchobj.group('sig')
-                        rest = matchobj.group('rest')
-                        if symbol and not rest:
-                            if signature:
-                                symbol += signature
-                            f_clist.write('%s\n' % symbol)
-                        else:
-                            invalid += 1
-                            warning('invalid symbol completion: %s', result)
-                    else:
-                        error('invalid symbol completion: %s', result)
-                        break
-                else:
-                    f_ack = open(self.gdb.globaal.f_ack.name, 'w')
-                    f_ack.write('Ok\n')
-                    info('%d symbols fetched for break and clear completion',
-                            len(completion_list) - invalid)
-        finally:
-            if f_clist:
-                f_clist.close()
-            if f_ack:
-                f_ack.close()
-            else:
-                self.gdb.console_print('Failed to fetch symbols completion.\n')
+        self.stream_record += stream_record
 
 class MiCommand(Command):
     """The MiCommand abstract class.
@@ -817,7 +925,6 @@ class MiCommand(Command):
     """
 
     def __init__(self, gdb, varobj):
-        """Constructor."""
         self.gdb = gdb
         self.varobj = varobj
         self.result = ''
@@ -841,15 +948,18 @@ class MiCommand(Command):
 class VarCreateCommand(MiCommand):
     """Create a variable object."""
 
+    varnum = 1
+
     def sendcmd(self):
         """Send the gdb command."""
-        return MiCommand.docmd(self, '-var-create - * %s\n',
-                                    misc.quote(self.varobj['exp']))
+        return MiCommand.docmd(self, '-var-create var%d * %s\n',
+                               self.varnum, misc.quote(self.varobj['exp']))
 
     def handle_result(self, line):
         """Process gdb/mi result."""
+        VarCreateCommand.varnum += 1
         parsed = misc.parse_keyval(re_varcreate, line)
-        if parsed is not None and VARCREATE_ATTRIBUTES.issubset(parsed):
+        if VARCREATE_ATTRIBUTES.issubset(parsed):
             rootvarobj = self.gdb.info.varobj
             varobj = self.varobj
             varobj.update(parsed)
@@ -877,7 +987,6 @@ class VarDeleteCommand(MiCommand):
                 name = self.varobj['name']
                 rootvarobj = self.gdb.info.varobj
                 (varobj, varlist) = rootvarobj.leaf(name)
-                unused = varobj
                 if varlist is not None:
                     del varlist[name]
                     rootvarobj.dirty = True
@@ -914,7 +1023,7 @@ class NumChildrenCommand(MiCommand):
         pass
 
 # 'type' and 'value' are not always present in -var-list-children output
-LIST_CHILDREN_KEYS = VARLISTCHILDREN_ATTRIBUTES.difference(set(('type', 'value')))
+LIST_CHILDREN_KEYS = VARLISTCHILDREN_ATTRIBUTES.difference({'type', 'value'})
 class ListChildrenCommand(MiCommand):
     """Return a list of the object's children."""
 
@@ -928,49 +1037,10 @@ class ListChildrenCommand(MiCommand):
         varlist = [VarObj(x) for x in
                         [misc.parse_keyval(re_varlistchildren, list_element)
                             for list_element in re_dict_list.findall(line)]
-                if x is not None and LIST_CHILDREN_KEYS.issubset(x)]
+                if LIST_CHILDREN_KEYS.issubset(x)]
         for varobj in varlist:
             self.varobj['children'][varobj['name']] = varobj
         self.gdb.info.varobj.dirty = True
-
-class WhatIs(Command):
-    """The WhatIs command.
-
-    Instance attributes:
-        gdb: Gdb
-            the Gdb instance
-        text: str
-            the selected text under the mouse
-
-    """
-
-    def __init__(self, gdb, text):
-        """Constructor."""
-        self.gdb = gdb
-        self.text = text
-
-    def sendcmd(self):
-        """Send the gdb command."""
-        if self.gdb.accepting_cmd():
-            self.gdb.gdb_busy = True
-            return self.send('-interpreter-exec console %s\n',
-                                misc.quote('whatis %s' % self.text))
-        return False
-
-    def handle_result(self, line):
-        """Process gdb/mi result."""
-        # ignore the error
-        return
-
-    def handle_strrecord(self, stream_record):
-        """Process the gdb/mi stream records."""
-        if self.gdb.dereference:
-            matchobj = re_type.match(stream_record.strip())
-            if (matchobj
-                        and len(matchobj.group('star')) == 1
-                        and matchobj.group('name') != 'char'):
-                self.text = '* %s' % self.text
-        self.gdb.oob_list.push(ShowBalloon(self.gdb, self.text))
 
 class ShowBalloon(Command):
     """The ShowBalloon command.
@@ -986,16 +1056,18 @@ class ShowBalloon(Command):
     """
 
     def __init__(self, gdb, text):
-        """Constructor."""
         self.gdb = gdb
         self.text = text
         self.result = ''
 
     def sendcmd(self):
         """Send the gdb command."""
-        self.result = ''
-        return self.send('-data-evaluate-expression %s\n',
-                                    misc.quote(self.text))
+        if self.gdb.accepting_cmd():
+            self.result = ''
+            self.gdb.gdb_busy = True
+            return self.send('-data-evaluate-expression %s\n',
+                                        misc.quote(self.text))
+        return False
 
     def handle_result(self, line):
         """Process gdb/mi result."""
@@ -1004,21 +1076,11 @@ class ShowBalloon(Command):
             self.result = misc.unquote(matchobj.group('value'))
             if self.result:
                 self.gdb.show_balloon('%s = "%s"' % (self.text, self.result))
-        elif not 'Attempt to use a type name as an expression' in line:
-            self.gdb.show_balloon('%s: %s' % (self.text, line))
 
     def handle_strrecord(self, stream_record):
         """Process the gdb/mi stream records."""
         if not self.result and stream_record:
             self.gdb.show_balloon(stream_record)
-
-    def __call__(self):
-        """Run the gdb command.
-
-        Return True when the command has been sent to gdb, False otherwise.
-
-        """
-        return self.sendcmd()
 
 class VarObjCmd(Command):
     """The VarObjCmd abstract class.
@@ -1033,8 +1095,9 @@ class VarObjCmd(Command):
 
     """
 
+    __metaclass__ = ABCMeta
+
     def __init__(self, gdb, varobj):
-        """Constructor."""
         self.gdb = gdb
         self.varobj = varobj
         self.result = ''
@@ -1044,14 +1107,13 @@ class VarObjCmd(Command):
         if not self.result and stream_record:
             self.gdb.console_print(stream_record)
 
+    @abstractmethod
     def sendcmd(self):
         """Send the gdb command.
 
         Return True when the command has been sent to gdb, False otherwise.
 
         """
-        unused = self
-        raise NotImplementedError('must be implemented in subclass')
 
     def __call__(self):
         """Run the gdb command.
@@ -1079,7 +1141,7 @@ class VarObjCmdEvaluate(VarObjCmd):
     def handle_result(self, line):
         """Send the gdb command."""
         parsed = misc.parse_keyval(re_varevaluate, line)
-        if parsed is not None and VAREVALUATE_ATTRIBUTES.issubset(parsed):
+        if VAREVALUATE_ATTRIBUTES.issubset(parsed):
             self.result = line
             value = parsed['value']
             if value != self.varobj['value']:
@@ -1111,7 +1173,6 @@ class VarObjCmdDelete(VarObjCmd):
                 name = self.varobj['name']
                 rootvarobj = self.gdb.info.varobj
                 (varobj, varlist) = rootvarobj.leaf(name)
-                unused = varobj
                 if varlist is not None:
                     del varlist[name]
                     rootvarobj.dirty = True
@@ -1124,24 +1185,22 @@ class OobCommand(object):
 
     """
 
+    __metaclass__ = ABCMeta
+
     def __init__(self, gdb):
-        """Constructor."""
         self.gdb = gdb
 
+    @abstractmethod
     def notify(self, cmd):
         """Notify of the cmd being processed."""
-        unused = self
-        unused = cmd
-        raise NotImplementedError('must be implemented in subclass')
 
+    @abstractmethod
     def __call__(self):
         """Run the gdb command or perform the task.
 
         Return True when the command has been sent to gdb, False otherwise.
 
         """
-        unused = self
-        raise NotImplementedError('must be implemented in subclass')
 
 class OobGdbCommand(OobCommand, Command):
     """Base abstract class for oob commands.
@@ -1176,16 +1235,15 @@ class OobGdbCommand(OobCommand, Command):
     """
 
     def __init__(self, gdb):
-        """Constructor."""
         OobCommand.__init__(self, gdb)
         assert self.__class__ is not OobGdbCommand
-        assert hasattr(self, 'gdb_cmd') and isinstance(self.gdb_cmd, str)
+        assert hasattr(self, 'gdb_cmd') and isinstance(self.gdb_cmd, text_type)
         self.mi = not self.gdb_cmd.startswith('-interpreter-exec console')
         assert hasattr(self, 'info_attribute')              \
-                and isinstance(self.info_attribute, str)    \
+                and isinstance(self.info_attribute, text_type)\
                 and hasattr(self.gdb.info, self.info_attribute)
         assert hasattr(self, 'prefix')                      \
-                and isinstance(self.prefix, str)
+                and isinstance(self.prefix, text_type)
         assert hasattr(self, 'regexp')                      \
                 and hasattr(self.regexp, 'findall')
         assert hasattr(self, 'gdblist')                     \
@@ -1201,8 +1259,8 @@ class OobGdbCommand(OobCommand, Command):
 
         # build prefix list that triggers the command after being notified
         keys = list(set(self.gdb.cmds.keys()).difference(set(self.trigger_list)))
-        self.trigger_prefix = set([misc.smallpref_inlist(x, keys)
-                                                for x in self.trigger_list])
+        self.trigger_prefix = {misc.smallpref_inlist(x, keys)
+                                                for x in self.trigger_list}
 
     def notify(self, cmd):
         """Notify of the cmd being processed.
@@ -1213,7 +1271,7 @@ class OobGdbCommand(OobCommand, Command):
         """
         self.cmd = cmd
         if not self.trigger_list or     \
-                    misc.any([cmd.startswith(x) for x in self.trigger_prefix]):
+                    any([cmd.startswith(x) for x in self.trigger_prefix]):
             self.trigger = True
 
     def __call__(self):
@@ -1223,7 +1281,11 @@ class OobGdbCommand(OobCommand, Command):
 
         """
         if self.trigger:
-            setattr(self.gdb.info, self.info_attribute, [])
+            if not self.gdblist and self.reqkeys:
+                setattr(self.gdb.info, self.info_attribute, {})
+            else:
+                setattr(self.gdb.info, self.info_attribute, [])
+
             self.trigger = False
             return self.send(self.gdb_cmd)
         return False
@@ -1234,28 +1296,36 @@ class OobGdbCommand(OobCommand, Command):
         When successful, set the info_attribute.
 
         """
-        try:
+        if self.prefix in data:
             remain = data[data.index(self.prefix) + len(self.prefix):]
-        except ValueError:
+        elif hasattr(self, 'ignore') and self.ignore in data:
+            return
+        else:
             debug('bad prefix in oob parsing of "%s",'
                     ' requested prefix: "%s"', data.strip(), self.prefix)
+            return
+
+        # Parse as a Python:
+        #   * list of dict: self.gdblist is True
+        #   * a dict: self.gdblist is False and self.reqkeys not empty
+        #   * a list: self.gdblist is False and self.reqkeys empty
+        if self.gdblist:
+            # A list of dictionaries.
+            parsed = [x for x in
+                       [misc.parse_keyval(self.regexp, list_element)
+                        for list_element in re_dict_list.findall(remain)]
+                             if self.reqkeys.issubset(x)]
         else:
-            if self.gdblist:
-                # a list of dictionaries
-                parsed = [x for x in
-                           [misc.parse_keyval(self.regexp, list_element)
-                            for list_element in re_dict_list.findall(remain)]
-                                 if x is not None and self.reqkeys.issubset(x)]
+            if self.reqkeys:
+                parsed = misc.parse_keyval(self.regexp, remain)
+                if not self.reqkeys.issubset(parsed):
+                    parsed = {}
             else:
-                if self.reqkeys:
-                    parsed = misc.parse_keyval(self.regexp, remain)
-                    if parsed is not None and not self.reqkeys.issubset(parsed):
-                        parsed = None
-                else:
-                    parsed = self.regexp.findall(remain)
-            if parsed:
-                setattr(self.gdb.info, self.info_attribute, parsed)
-            else:
+                parsed = self.regexp.findall(remain)
+        if parsed:
+            setattr(self.gdb.info, self.info_attribute, parsed)
+        else:
+            if not hasattr(self, 'remain') or remain != self.remain:
                 debug('no match for "%s"', remain)
 
     def handle_result(self, result):
@@ -1266,11 +1336,8 @@ class OobGdbCommand(OobCommand, Command):
             if hasattr(self, 'action'):
                 try:
                     getattr(self.gdb.info, self.action)(self.cmd)
-                except (KeyError, ValueError), err:
-                    t, v, filename, lnum, last_tb = misc.last_traceback()
-                    unused = (t, v, last_tb)
-                    error('Exception %s: "%s" at %s:%d', type(err), err,
-                                                            filename, lnum)
+                except (KeyError, ValueError):
+                    error(traceback.format_tb(sys.exc_info()[2])[-1])
                     info_attribute = getattr(self.gdb.info,
                                             self.info_attribute)
                     if info_attribute:
@@ -1283,13 +1350,14 @@ class OobGdbCommand(OobCommand, Command):
 
 # instantiate the OobGdbCommand subclasses
 Args =          \
-    type('Args', (OobGdbCommand,),
+    type(str('Args'), (OobGdbCommand,),
             {
                 '__doc__': """Get the program arguments.""",
                 'gdb_cmd': '-interpreter-exec console "show args"\n',
                 'info_attribute': 'args',
                 'prefix': 'Argument list to give program being'     \
                           ' debugged when it is started is',
+                'remain': ' "".\n',
                 'regexp': re_args,
                 'reqkeys': set(),
                 'gdblist': False,
@@ -1297,12 +1365,13 @@ Args =          \
             })
 
 Breakpoints =   \
-    type('Breakpoints', (OobGdbCommand,),
+    type(str('Breakpoints'), (OobGdbCommand,),
             {
                 '__doc__': """Get the breakpoints list.""",
                 'gdb_cmd': '-break-list\n',
                 'info_attribute': 'breakpoints',
-                'prefix': 'done,',
+                'prefix': 'body=[',
+                'remain': ']}',
                 'regexp': re_breakpoints,
                 'reqkeys': REQ_BREAKPOINT_ATTRIBUTES,
                 'gdblist': True,
@@ -1311,7 +1380,7 @@ Breakpoints =   \
             })
 
 Directories =   \
-    type('Directories', (OobGdbCommand,),
+    type(str('Directories'), (OobGdbCommand,),
             {
                 '__doc__': """Get the directory list.""",
                 'gdb_cmd': '-interpreter-exec console "show directories"\n',
@@ -1324,7 +1393,7 @@ Directories =   \
             })
 
 File =          \
-    type('File', (OobGdbCommand,),
+    type(str('File'), (OobGdbCommand,),
             {
                 '__doc__': """Get the source file.""",
                 'gdb_cmd': '-file-list-exec-source-file\n',
@@ -1337,7 +1406,7 @@ File =          \
             })
 
 FrameCli =      \
-    type('FrameCli', (OobGdbCommand,),
+    type(str('FrameCli'), (OobGdbCommand,),
             {
                 '__doc__': """Get the frame information.""",
                 'version_max': [6, 3],
@@ -1345,29 +1414,60 @@ FrameCli =      \
                 'info_attribute': 'frame',
                 'prefix': 'done,',
                 'regexp': re_framecli,
-                'reqkeys': FRAMECLI_ATTRIBUTES,
+                'reqkeys': REQ_FRAME_ATTRIBUTES,
                 'gdblist': False,
                 'action': 'update_frame',
                 'trigger_list': FRAME_CMDS,
             })
 
 Frame=          \
-    type('Frame', (OobGdbCommand,),
+    type(str('Frame'), (OobGdbCommand,),
             {
                 '__doc__': """Get the frame information.""",
                 'version_min': [6, 4],
                 'gdb_cmd': '-stack-info-frame\n',
                 'info_attribute': 'frame',
                 'prefix': 'done,',
+                'ignore': 'error,msg="No registers."',
                 'regexp': re_frame,
-                'reqkeys': FRAME_ATTRIBUTES,
+                'reqkeys': REQ_FRAME_ATTRIBUTES,
                 'gdblist': False,
                 'action': 'update_frame',
                 'trigger_list': FRAME_CMDS,
             })
 
+BackTrace=          \
+    type(str('BackTrace'), (OobGdbCommand,),
+            {
+                '__doc__': """Get the backtrace information.""",
+                'gdb_cmd': '-stack-list-frames\n',
+                'info_attribute': 'backtrace',
+                'prefix': 'stack=[',
+                'remain': ']}',
+                'ignore': 'error,msg="No registers."',
+                'regexp': re_frame,
+                'reqkeys': REQ_FRAME_ATTRIBUTES,
+                'gdblist': True,
+                'trigger_list': FRAME_CMDS,
+            })
+
+Threads=          \
+    type(str('Threads'), (OobGdbCommand,),
+            {
+                '__doc__': """Get the threads information.""",
+                'gdb_cmd': '-thread-info\n',
+                'info_attribute': 'threads_list',
+                'prefix': 'threads=[',
+                'remain': ']',
+                'regexp': re_threads,
+                'reqkeys': set(),
+                'gdblist': False,
+                'action': 'update_threads',
+                'trigger_list': THREADS_CMDS,
+            })
+
 PgmFile =       \
-    type('PgmFile', (OobGdbCommand,),
+    type(str('PgmFile'), (OobGdbCommand,),
             {
                 '__doc__': """Get the program file.""",
                 'gdb_cmd': '-interpreter-exec console "info files"\n',
@@ -1380,7 +1480,7 @@ PgmFile =       \
             })
 
 Pwd =           \
-    type('Pwd', (OobGdbCommand,),
+    type(str('Pwd'), (OobGdbCommand,),
             {
                 '__doc__': """Get the current working directory.""",
                 'gdb_cmd': '-environment-pwd\n',
@@ -1393,25 +1493,27 @@ Pwd =           \
             })
 
 Sources =       \
-    type('Sources', (OobGdbCommand,),
+    type(str('Sources'), (OobGdbCommand,),
             {
                 '__doc__': """Get the list of source files.""",
                 'gdb_cmd': '-file-list-exec-source-files\n',
                 'info_attribute': 'sources',
                 'prefix': 'done,',
+                'remain': 'files=[]',
                 'regexp': re_sources,
                 'reqkeys': SOURCES_ATTRIBUTES,
                 'gdblist': True,
-                'trigger_list': SOURCE_CMDS,
+                'trigger_list': SOURCE_CMDS + SOURCE_CMDS_EXTRA,
             })
 
 VarUpdate =     \
-    type('VarUpdate', (OobGdbCommand,),
+    type(str('VarUpdate'), (OobGdbCommand,),
             {
                 '__doc__': """Update the variable and its children.""",
                 'gdb_cmd': '-var-update *\n',
                 'info_attribute': 'changelist',
                 'prefix': 'done,',
+                'remain': 'changelist=[]',
                 'regexp': re_varupdate,
                 'reqkeys': VARUPDATE_ATTRIBUTES,
                 'gdblist': True,
@@ -1429,7 +1531,6 @@ class Project(OobCommand):
     """
 
     def __init__(self, gdb):
-        """Constructor."""
         OobCommand.__init__(self, gdb)
         self.project_name = ''
 
@@ -1448,7 +1549,7 @@ class Project(OobCommand):
         """
         gdb_info = self.gdb.info
         bp_list = []
-        for num in sorted(gdb_info.bp_dictionary.keys(), key=int):
+        for num in sorted(list(gdb_info.bp_dictionary.keys()), key=int):
             bp_element = gdb_info.bp_dictionary[num]
             pathname = gdb_info.get_fullpath(bp_element['file'])
             breakpoint = '%s:%s' % (pathname, bp_element['line'])
@@ -1465,17 +1566,15 @@ class Project(OobCommand):
             quitting = (self.gdb.state == self.gdb.STATE_QUITTING)
             if gdb_info.debuggee:
                 try:
-                    project = open(self.project_name, 'w+b')
+                    project = open(self.project_name, 'w')
 
                     if gdb_info.cwd:
                         cwd = gdb_info.cwd[0]
                         if not cwd.endswith(os.sep):
                             cwd += os.sep
-                        project.write('cd %s\n'
-                            % misc.norm_unixpath(misc.unquote(cwd), True))
+                        project.write('cd %s\n' % misc.unquote(cwd))
 
-                    project.write('file %s\n'
-                            % misc.norm_unixpath(gdb_info.debuggee[0], True))
+                    project.write('file %s\n' % gdb_info.debuggee[0])
 
                     if gdb_info.args:
                         project.write('set args %s\n' % gdb_info.args[0])
@@ -1489,7 +1588,7 @@ class Project(OobCommand):
                     self.gdb.console_print('%s\n', msg)
                     if not quitting:
                         self.gdb.print_prompt()
-                except IOError, errmsg:
+                except IOError as errmsg:
                     pass
             else:
                 errmsg = 'Project \'%s\' not saved:'    \
@@ -1508,8 +1607,6 @@ class Quit(OobCommand):
 
     def notify(self, cmd):
         """Ignore the notification."""
-        unused = self
-        unused = cmd
 
     def __call__(self):
         """Quit gdb."""
@@ -1519,7 +1616,7 @@ class Quit(OobCommand):
             # the Debugger instance is closing, its dispatch loop timer is
             # closing as well and we cannot rely on this timer anymore to handle
             # buffering on the console, so switch to no buffering
-            self.gdb.console_print('\n===========\n')
+            self.gdb.console_print('\n=== End of gdb session ===\n')
             self.gdb.console_flush()
 
             self.gdb.state = self.gdb.STATE_CLOSING
