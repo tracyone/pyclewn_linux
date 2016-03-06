@@ -59,11 +59,10 @@ version 2.2 has following new feature:
 - key map
 	* after start pyclewn(red triangle button),press tab equal to :C
 	* `<leader>pw` equal to :silent! Cdbgvar,create a gdb watched variable on current cursor
-	* `<space>` When the watched variable is a structure or class instance, it can be expanded
-with the|Cfoldvar|pyclewn command to display all its members and their values
-as children watched variables
-	* <leader>pp load proj setting
-	* <leader>pc save current project setting (such as breakpoint position..)
+	* `<space>` When the watched variable is a structure or class instance, it can be expanded with the|Cfoldvar|pyclewn command to display all its members and their values as children watched variables
+	* `dd`: in `(clewn)_variables` buffer,this can delete the watch corresponding variable
+	* `<leader>pp` load proj setting
+	* `<leader>pc` save current project setting (such as breakpoint position..)
 	
 # Screenshot
 
