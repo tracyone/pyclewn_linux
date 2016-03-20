@@ -4,11 +4,13 @@
 
 pyclewn's version:pyclewn-2.2
 
-Current version is not stable enough，please use pyclewn-1.11
+Current version is not working properly, please use branch 1.11
+
+If you are familiar with python,please help me to get version 2.2 work.
 
 ```vim
 "use vim-plug install pyclewn_linux
-Plug 'tracyone/pyclewn_linux,{'tag': 'pyclewn-1.11'}'
+Plug 'tracyone/pyclewn_linux,{'branch': 'pyclewn-1.11'}'
 ```
 
 # New feature compare to version 1.11
