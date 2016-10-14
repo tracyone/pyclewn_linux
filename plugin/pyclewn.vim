@@ -20,11 +20,11 @@ endif
 
 " The 'Pyclewn' command starts pyclewn and vim netbeans interface.
 command! -nargs=* -complete=file Pyclewn call pyclewn#StartClewn(<f-args>)
-command! -nargs=0 PyclewWatch silent! Cdbgvar <C-R><C-W><CR>
-command! -nargs=0 PyclewnStart silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
-command! -nargs=0 PyclewnLoad call LoadProj()<cr>
-command! -nargs=0 PyclewnExit call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>
-command! -nargs=0 PyclewnSave Cproject .proj<cr>
+command! -nargs=0 PyclewWatch exec "silent! Cdbgvar " . expand("<cword>")
+command! -nargs=0 PyclewnStart  exec "silent! Pyclewn" | call Pyclewnmap()
+command! -nargs=0 PyclewnLoad call LoadProj()
+command! -nargs=0 PyclewnExit call Pyclewnunmap() | Cquit | nbclose | call Pyclewnunmap()
+command! -nargs=0 PyclewnSave Cproject .proj
 
 "autocmd group for pyclewn
 augroup PyclewnGroup
