@@ -20,6 +20,11 @@ endif
 
 " The 'Pyclewn' command starts pyclewn and vim netbeans interface.
 command! -nargs=* -complete=file Pyclewn call pyclewn#StartClewn(<f-args>)
+command! -nargs=0 PyclewWatch silent! Cdbgvar <C-R><C-W><CR>
+command! -nargs=0 PyclewnStart silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
+command! -nargs=0 PyclewnLoad call LoadProj()<cr>
+command! -nargs=0 PyclewnExit call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>
+command! -nargs=0 PyclewnSave Cproject .proj<cr>
 
 "autocmd group for pyclewn
 augroup PyclewnGroup
@@ -77,16 +82,11 @@ if s:is_linux==1
 else
     let g:pyclewn_args = "--args=-q --gdb=async"
 endif
-silent!	nnoremap <leader>pw :silent! Cdbgvar <C-R><C-W><CR>
 au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> <space> :silent! exe "Cfoldvar " . line(".")<CR>
 au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> <c-d> 25<down>
 au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> <c-b> 25<up>
 au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> dd 0f]w:exec "Cdelvar " . expand('<cword>')<cr>
 
-nnoremap <leader>ps :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
-nnoremap <leader>pp :call LoadProj()<cr>
-nnoremap <leader>pd :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>
-nnoremap <leader>pc :Cproject .proj<cr>
 "}}}
 amenu ToolBar.-Sep- :
 if s:is_linux==0
