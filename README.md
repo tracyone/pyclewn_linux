@@ -31,13 +31,14 @@ Plug 'tracyone/pyclewn_linux,{'branch': 'pyclewn-1.11'}'
    * when you are debugging ,press this button,it can create .proj file in current dir which save the info about breakpoint position and how to load the program(such as option and argurements)
 - key map
 	* after start pyclewn(red triangle button),press tab equal to :C
-	* `<leader>pw` equal to :silent! Cdbgvar,create a gdb watched variable on current cursor
+	* `:PyclewWatch` equal to :silent! Cdbgvar,create a gdb watched variable on current cursor
 	* `<space>` When the watched variable is a structure or class instance, it can be expanded
 with the|Cfoldvar|pyclewn command to display all its members and their values
 as children watched variables
     * `dd`: this can delete the watch corresponding variable in current line
-	* `<leader>pp` load proj setting
-	* `<leader>pc` save current project setting (such as breakpoint position..)
+	* `:PyclewnLoad` load proj setting
+	* `:PyclewnSave` save current project setting (such as breakpoint position..)
+	* `:PyclewnExit` exit pyclewn.
 	
 - screenshot
 	![1407051404492424](https://cloud.githubusercontent.com/assets/4246425/3483972/503dde1e-039b-11e4-9f95-2b6cb73f5b02.gif)
