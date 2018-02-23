@@ -87,32 +87,33 @@ au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> <c-d> 25<down>
 au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> <c-b> 25<up>
 au PyclewnGroup BufWinEnter (clewn)_dbgvar nnoremap <buffer> dd 0f]w:exec "Cdelvar " . expand('<cword>')<cr>
 
+let $icon_directory=fnamemodify(expand('<sfile>'), ":p:h").'/../debug_icons'
 "}}}
 amenu ToolBar.-Sep- :
 if s:is_linux==0
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgrun.bmp ToolBar.Run :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/run.bmp ToolBar.Start :Cstart<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/stop.bmp ToolBar.Quit :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>:call Pyclewnunmap()<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgnext.bmp ToolBar.Next :Cnext<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgstep.bmp ToolBar.Step :Cstep<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgstepi.bmp ToolBar.Stepi :Cstepi<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgrunto.bmp ToolBar.Runto :Ccontinue<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgstepout.bmp ToolBar.Finish :Cfinish<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/dbgwindow.bmp ToolBar.Watch :call OpenClosedbgvar()<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/project.bmp ToolBar.Project :silent! Pyclewn<cr>:call Pyclewnmap()<cr>:Csource .proj<cr>:Cstart<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn/debug_icons/filesaveas.bmp ToolBar.SaveProject :Cproject .proj<cr>
+    amenu icon=$icon_directory/dbgrun.bmp ToolBar.Run :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>
+    amenu icon=$icon_directory/run.bmp ToolBar.Start :Cstart<cr>
+    amenu icon=$icon_directory/stop.bmp ToolBar.Quit :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>:call Pyclewnunmap()<cr>
+    amenu icon=$icon_directory/dbgnext.bmp ToolBar.Next :Cnext<cr>
+    amenu icon=$icon_directory/dbgstep.bmp ToolBar.Step :Cstep<cr>
+    amenu icon=$icon_directory/dbgstepi.bmp ToolBar.Stepi :Cstepi<cr>
+    amenu icon=$icon_directory/dbgrunto.bmp ToolBar.Runto :Ccontinue<cr>
+    amenu icon=$icon_directory/dbgstepout.bmp ToolBar.Finish :Cfinish<cr>
+    amenu icon=$icon_directory/dbgwindow.bmp ToolBar.Watch :call OpenClosedbgvar()<cr>
+    amenu icon=$icon_directory/project.bmp ToolBar.Project :silent! Pyclewn<cr>:call Pyclewnmap()<cr>:Csource .proj<cr>:Cstart<cr>
+    amenu icon=$icon_directory/filesaveas.bmp ToolBar.SaveProject :Cproject .proj<cr>
 else
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgrun.png ToolBar.Run :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>:Cinferiortty<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/run.png ToolBar.Start :Cstart<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgstop.png ToolBar.Quit :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>:call Pyclewnunmap()<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgnext.png ToolBar.Next :Cnext<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgstep.png ToolBar.Step :Cstep<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgstepi.png ToolBar.Stepi :Cstepi<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgrunto.png ToolBar.Runto :Ccontinue<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgstepout.png ToolBar.Finish :Cfinish<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/dbgwindow.png ToolBar.Watch :call OpenClosedbgvar()<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/project.png ToolBar.Project :silent! Pyclewn<cr>:call Pyclewnmap()<cr>:Cinferiortty<cr>:Csource .proj<cr>:Cstart<cr>
-    amenu icon=$VIMFILES/bundle/pyclewn_linux/debug_icons/filesaveas.png ToolBar.SaveProject :Cproject .proj<cr>
+    amenu icon=$icon_directory/dbgrun.png ToolBar.Run :silent! Pyclewn<cr>:silent! call Pyclewnmap()<cr>:Cinferiortty<cr>
+    amenu icon=$icon_directory/run.png ToolBar.Start :Cstart<cr>
+    amenu icon=$icon_directory/dbgstop.png ToolBar.Quit :call Pyclewnunmap()<cr>:Cquit<cr>:nbclose<cr>:call Pyclewnunmap()<cr>
+    amenu icon=$icon_directory/dbgnext.png ToolBar.Next :Cnext<cr>
+    amenu icon=$icon_directory/dbgstep.png ToolBar.Step :Cstep<cr>
+    amenu icon=$icon_directory/dbgstepi.png ToolBar.Stepi :Cstepi<cr>
+    amenu icon=$icon_directory/dbgrunto.png ToolBar.Runto :Ccontinue<cr>
+    amenu icon=$icon_directory/dbgstepout.png ToolBar.Finish :Cfinish<cr>
+    amenu icon=$icon_directory/dbgwindow.png ToolBar.Watch :call OpenClosedbgvar()<cr>
+    amenu icon=$icon_directory/project.png ToolBar.Project :silent! Pyclewn<cr>:call Pyclewnmap()<cr>:Cinferiortty<cr>:Csource .proj<cr>:Cstart<cr>
+    amenu icon=$icon_directory/filesaveas.png ToolBar.SaveProject :Cproject .proj<cr>
 endif
 tmenu ToolBar.Run Connect pyclewn-->Map keys-->Cfile <user input>
 tmenu ToolBar.Start	Start debug(Cstart)
